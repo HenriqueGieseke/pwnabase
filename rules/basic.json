@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "id": "basic",
+  "description": "Eight introductory transformations, each starting from the original candidate",
+  "rules": [
+    {"id": "original", "description": "Keep the original candidate", "expression": ":"},
+    {"id": "lowercase", "description": "Lowercase the candidate", "expression": "l"},
+    {"id": "uppercase", "description": "Uppercase the candidate", "expression": "u"},
+    {"id": "capitalize", "description": "Capitalize first letter and lowercase the rest", "expression": "c"},
+    {"id": "append_exclamation", "description": "Append !", "expression": "$!"},
+    {"id": "append_one", "description": "Append 1", "expression": "$1"},
+    {"id": "append_123", "description": "Append 123", "expression": "$1$2$3"},
+    {"id": "capitalize_append_exclamation", "description": "Capitalize then append !", "expression": "c$!"}
+  ]
+}

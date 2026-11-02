@@ -1,0 +1,42 @@
+# Wireless Security Studies
+
+Terminology for authorized offline password recovery and future correlation with wireless observations.
+
+## Language
+
+**Result sheet**:
+A tabular view of JSON files from a selected project data directory. Each file occupies one row, and its nested content is available in a details panel.
+
+**Capture**:
+A recorded collection of wireless packets. One capture can contain multiple handshakes or no usable handshake.
+_Avoid_: Hash, password
+
+**Handshake**:
+A wireless authentication exchange from which password verification material may be extracted.
+_Avoid_: Password
+
+**Recovered password**:
+A password candidate successfully verified against a captured network authentication record.
+_Avoid_: Decrypted hash, cracked hash
+
+**Wordlist exhausted**:
+An outcome in which all candidates in a particular wordlist have been tried without recovering a password for the record under examination. It does not establish that recovery is impossible.
+
+**No usable handshake**:
+An outcome in which a readable capture yields no authentication material usable by the selected recovery workflow.
+
+**Capture provenance**:
+The association of an authentication record or recovery result with its original capture, including the capture's content fingerprint.
+
+**BSSID**:
+The address identifying an access-point radio in a wireless observation. It is retained alongside the network name for later correlation.
+
+**SSID**:
+The network name advertised or used by a wireless network. Different networks may share the same name.
+_Avoid_: Unique network identifier
+
+**Mutation rule**:
+A transformation sequence that generates a password candidate from an original wordlist entry. Separate rules each start from the original entry.
+
+**Rule set**:
+An ordered collection of mutation rules used for a recovery attempt. The rule set identifies the transformations tried in addition to the chosen wordlist.
