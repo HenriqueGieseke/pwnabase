@@ -36,6 +36,14 @@ wordlist. The rules sheet has one row per catalog, with individual transformatio
 in the details panel. Newest results appear first; rules use file modification
 time when no result timestamp exists. All tabs have independent controls.
 
+Enable **Hide duplicates** beside search to show one row per identical SSID,
+BSSID and password combination in the active sheet. Filtering happens before
+pagination and retains the first matching row in the selected sort order.
+The checkbox defaults to off and retains its setting per tab during refresh.
+Files without network identifiers stay separate, and hexadecimal password bytes
+are distinguished when the password cannot be displayed as text. Source files
+are never deleted or merged.
+
 The active sheet refreshes every five seconds. Metadata is checked sequentially,
 and unchanged JSON contents are reused from memory. Updates preserve filters,
 sort, page, selected file and scroll, clamping the page if files disappear. Files

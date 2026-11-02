@@ -68,7 +68,14 @@ export function createStore(root) {
             sourceCount: Array.isArray(data?.sources) ? data.sources.length : 0,
             error: problem || scalar(data?.error),
           }
-          cached = { stamp, row, data, problem }
+          // Missing network identifiers must not collapse unrelated capture/error files.
+          const duplicateKey = !problem && typeof record.ssid === 'string' && record.ssid && row.bssid
+            ? JSON.stringify([
+              scalar(record.ssid_hex, Buffer.from(record.ssid).toString('hex')).toLowerCase(),
+              row.bssid.toLowerCase(),
+              typeof data.password === 'string' ? Buffer.from(data.password).toString('hex') : scalar(data.password_hex).toLowerCase(),
+            ]) : null
+          cached = { stamp, row, data, problem, duplicateKey }
           cache.set(key, cached)
         }
         results.push(cached)
@@ -86,7 +93,7 @@ export function createStore(root) {
       const words = [...new Set(records.map(({ row }) => row.wordlist).filter(Boolean))].sort()
       const query = String(options.search || '').toLowerCase().slice(0, 500)
       const wordlist = String(options.wordlist || '')
-      const filtered = records.map(({ row }) => row).filter(row =>
+      let filtered = records.map(({ row }) => row).filter(row =>
         (!wordlist || row.wordlist === wordlist) &&
         (!query || Object.values(row).some(value => typeof value === 'string' && value.toLowerCase().includes(query))))
       const sort = sortable.has(options.sort) ? options.sort : 'updated'
@@ -97,10 +104,22 @@ export function createStore(root) {
         if (left && !right) return -1
         return direction * String(left).localeCompare(String(right), undefined, { numeric: true }) || a.id.localeCompare(b.id)
       })
+      let duplicatesHidden = 0
+      if (options.hideDuplicates === true || options.hideDuplicates === 'true') {
+        const keys = new Map(records.map(record => [record.row.id, record.duplicateKey]))
+        const seen = new Set()
+        filtered = filtered.filter(row => {
+          const key = keys.get(row.id)
+          if (!key) return true
+          if (seen.has(key)) { duplicatesHidden++; return false }
+          seen.add(key)
+          return true
+        })
+      }
       const pages = Math.max(1, Math.ceil(filtered.length / 50))
       const page = Math.min(pages, Math.max(1, Number.parseInt(options.page) || 1))
       return { tabs: SHEETS, rows: filtered.slice((page - 1) * 50, page * 50), total: records.length,
-        filtered: filtered.length, pages, page, wordlists: words, refreshedAt: new Date().toISOString() }
+        filtered: filtered.length, duplicatesHidden, pages, page, wordlists: words, refreshedAt: new Date().toISOString() }
     },
     async detail(tab, id) {
       const match = (await scan(tab)).find(item => item.row.id === id)
