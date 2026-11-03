@@ -73,7 +73,9 @@ behavioral identity permits another attempt. Original captures/wordlists are
 snapshotted rather than modified.
 
 Ctrl+C terminates tool process groups and joins workers, returning code 130.
-Completed files survive; unfinished attempts restart from the beginning. The
+Completed files survive. Transformed wordlist attempts resume after their last
+confirmed batch; the unfinished batch may replay. Other unfinished attempts
+restart from the beginning. The
 batch lock applies to one output location on one machine. It is not a distributed
 lock. Failed input processing remains isolated from later eligible inputs; shared
 startup failures stop the run.
@@ -83,7 +85,7 @@ and write bounded temporary candidate batches for Hashcat. Each fully exhausted
 batch is confirmed before processing continues; a recovered password can stop
 Hashcat partway through its current batch. Batch size adapts to measured
 end-to-end generation, file-writing, and Hashcat time toward roughly one minute,
-with an explicit maximum. Candidate
+with a maximum target; a batch may exceed it to finish a source word. Candidate
 deduplication remains per seed. This bounds memory and temporary-file size, not
 total work: a large profile can still generate very many candidates. The source
 must be fully generated before declaring the attempt exhausted.

@@ -26,12 +26,63 @@ def atomic_json(path, value):
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(name, path)
+        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
     finally:
         Path(name).unlink(missing_ok=True)
 
 
 def read_json(path):
     return json.loads(path.read_text(encoding='utf-8')) if path.exists() else None
+
+
+class CheckpointError(ValueError):
+    """Saved resume state is unreadable or does not match its attempt."""
+
+
+def read_checkpoint(path, identity):
+    if not path.exists():
+        return None
+    checkpoint = read_json(path)
+    if (not isinstance(checkpoint, dict)
+            or type(checkpoint.get('schema_version')) is not int
+            or checkpoint['schema_version'] != 1):
+        raise CheckpointError('Checkpoint has an unsupported or invalid schema')
+    if checkpoint.get('identity') != identity:
+        raise CheckpointError('Checkpoint identity does not match this attempt; saved state was preserved')
+    cursor = checkpoint.get('cursor')
+    if (not isinstance(cursor, dict) or type(cursor.get('byte_offset')) is not int
+            or cursor['byte_offset'] < 0):
+        raise CheckpointError('Checkpoint cursor is invalid; saved state was preserved')
+    generation = checkpoint.get('generation')
+    counters = ('seeds', 'generated', 'duplicates', 'rejected_length', 'eligible', 'non_utf8_seeds')
+    if (not isinstance(generation, dict)
+            or any(type(generation.get(key)) is not int or generation[key] < 0 for key in counters)
+            or not isinstance(generation.get('generator'), str)
+            or type(generation.get('source_complete')) is not bool):
+        raise CheckpointError('Checkpoint generation counts are invalid; saved state was preserved')
+    if generation['generator'] != identity.get('generator'):
+        raise CheckpointError('Checkpoint generator does not match its identity; saved state was preserved')
+    for key in ('hashcat_confirmed_candidates', 'checkpointed_candidates',
+                'confirmed_batches', 'generated_candidates'):
+        if type(checkpoint.get(key)) is not int or checkpoint[key] < 0:
+            raise CheckpointError('Checkpoint progress counts are invalid; saved state was preserved')
+    if type(checkpoint.get('source_complete')) is not bool:
+        raise CheckpointError('Checkpoint completion state is invalid; saved state was preserved')
+    if (checkpoint['generated_candidates'] != generation['eligible']
+            or checkpoint['hashcat_confirmed_candidates'] != generation['eligible']
+            or checkpoint['checkpointed_candidates'] != generation['eligible']
+            or generation['generated'] != (generation['duplicates'] + generation['rejected_length']
+                                             + generation['eligible'])
+            or checkpoint['source_complete'] != generation['source_complete']
+            or checkpoint['confirmed_batches'] < 1):
+        raise CheckpointError('Checkpoint progress is inconsistent; saved state was preserved')
+    if not isinstance(checkpoint.get('updated_at'), str):
+        raise CheckpointError('Checkpoint timestamp is invalid; saved state was preserved')
+    return checkpoint
 
 
 def add_source(result, source):
@@ -58,6 +109,9 @@ class ResultStore:
         if kind == 'exhausted':
             return self.root / 'exhausted' / label / f'{identity}.json'
         return self.root / kind / f'{identity}.json'
+
+    def checkpoint_path(self, record_id, attempt_key):
+        return self.root / '.pwnabase' / 'checkpoints' / f'{record_id}-{attempt_key}.json'
 
     def prepare(self, label):
         for folder in ['complete', f'exhausted/{label}', 'no-usable-handshake', 'tool-error']:

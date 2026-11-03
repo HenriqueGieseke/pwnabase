@@ -2,6 +2,7 @@
 
 from collections import Counter
 from dataclasses import dataclass, field, replace
+from datetime import datetime, timezone
 import fcntl
 import hashlib
 import json
@@ -18,6 +19,11 @@ from .config import ROOT, RunConfig, ToolConfig
 from .tools import ToolError
 
 EXTENSIONS = {'.pcap', '.pcapng', '.cap'}
+INITIAL_CANDIDATE_BATCH = 65_536
+MAX_CANDIDATE_BATCH = 1_000_000
+CANDIDATE_BATCH_TARGET_SECONDS = 60
+GENERATION_COUNTERS = ('seeds', 'generated', 'duplicates', 'rejected_length',
+                       'eligible', 'non_utf8_seeds')
 
 
 @dataclass
@@ -53,7 +59,96 @@ class BatchContext:
     stats: RunStats = field(default_factory=RunStats)
 
 
-def attempt_record(record, context, outcome):
+def _combined_generation(previous, current):
+    result = {
+        key: previous.get(key, 0) + current.get(key, 0)
+        for key in GENERATION_COUNTERS
+    }
+    result['generator'] = current.get('generator', previous.get('generator'))
+    result['source_complete'] = (current.get('source_complete', False)
+                                 or previous.get('source_complete', False))
+    return result
+
+
+def _checkpoint_identity(record, wordinfo, rules_info):
+    return {
+        'record_id': record['record_id'],
+        'wordlist_sha256': wordinfo['sha256'],
+        'profile_sha256': rules_info['sha256'],
+        'generator': candidates.WORDLIST_GENERATOR,
+    }
+
+
+def _recover_transformed_wordlist(record, context, stream, checkpoint_path,
+                                  identity, checkpoint, progress):
+    base_generation = dict(checkpoint['generation'])
+    base_generated_candidates = checkpoint['generated_candidates']
+    base_confirmed_candidates = checkpoint['hashcat_confirmed_candidates']
+    base_confirmed_batches = checkpoint['confirmed_batches']
+    if checkpoint['source_complete']:
+        print('  Saved checkpoint shows the candidate source is complete; finalizing the attempt.',
+              flush=True)
+        return None
+    if checkpoint['checkpointed_candidates']:
+        print(f'  Resuming transformed wordlist after {checkpoint["generation"]["seeds"]:,} seeds; '
+              f'{checkpoint["generated_candidates"]:,} candidates generated, '
+              f'{checkpoint["hashcat_confirmed_candidates"]:,} Hashcat-confirmed and '
+              f'{checkpoint["checkpointed_candidates"]:,} checkpointed.', flush=True)
+
+    batch_limit = INITIAL_CANDIDATE_BATCH
+    batch_number = base_confirmed_batches
+    confirmed_this_run = 0
+    while True:
+        batch_started = time.monotonic()
+        batch = stream.next_batch(context.work, batch_limit)
+        if batch is None:
+            if not stream.stats['source_complete']:
+                raise ToolError('Candidate source ended before generation completed')
+            return None
+        try:
+            password = tools.recover(record, batch.path, context.tools, context.env,
+                                     context.work, use_rules=False, hex_wordlist=True)
+            elapsed = max(time.monotonic() - batch_started, 0.001)
+            if password is not None:
+                print(f'  Recovered in candidate batch {batch_number + 1} after '
+                      f'{elapsed:.1f}s total batch time; Hashcat may have stopped before '
+                      'testing the full batch.', flush=True)
+                return password
+
+            generation = _combined_generation(base_generation, stream.stats)
+            generated_candidates = base_generated_candidates + stream.stats['eligible']
+            hashcat_confirmed = (base_confirmed_candidates + confirmed_this_run
+                                 + batch.candidate_count)
+            progress['hashcat_confirmed_candidates'] = hashcat_confirmed
+            batch_number += 1
+            updated = {
+                'schema_version': 1,
+                'identity': identity,
+                'cursor': {'byte_offset': batch.next_offset},
+                'generation': generation,
+                'generated_candidates': generated_candidates,
+                'hashcat_confirmed_candidates': hashcat_confirmed,
+                'checkpointed_candidates': hashcat_confirmed,
+                'confirmed_batches': batch_number,
+                'source_complete': batch.source_complete,
+                'updated_at': datetime.now(timezone.utc).isoformat(),
+            }
+            storage.atomic_json(checkpoint_path, updated)
+            checkpoint.clear()
+            checkpoint.update(updated)
+            confirmed_this_run += batch.candidate_count
+            print(f'  Candidate batch {batch_number} complete: {batch.candidate_count:,} candidates; '
+                  f'Hashcat confirmed exhaustion and checkpointed progress in {elapsed:.1f}s total.',
+                  flush=True)
+            measured_rate = batch.candidate_count / elapsed
+            batch_limit = max(1, min(MAX_CANDIDATE_BATCH,
+                                     int(measured_rate * CANDIDATE_BATCH_TARGET_SECONDS)))
+        finally:
+            batch.path.unlink(missing_ok=True)
+
+
+def attempt_record(record, context, outcome, checkpoint_path=None,
+                   checkpoint_identity=None, checkpoint=None):
     work, env, wordlist = context.work, context.env, context.wordlist
     if context.config.ssid:
         generated, outcome.generation = candidates.generate(bytes.fromhex(record['ssid_hex']), context.candidates.ssid_config)
@@ -68,12 +163,38 @@ def attempt_record(record, context, outcome):
         outcome.status = ('recovered' if outcome.password is not None else
                   'candidates_exhausted' if generated else 'no_eligible_candidates')
     elif context.candidates.wordlist_profile:
-        stream = candidates.WordlistCandidates(wordlist, context.candidates.ssid_config)
+        checkpoint = checkpoint or {
+            'cursor': {'byte_offset': 0},
+            'generation': {
+                'seeds': 0, 'generated': 0, 'duplicates': 0, 'rejected_length': 0,
+                'eligible': 0, 'non_utf8_seeds': 0, 'generator': candidates.WORDLIST_GENERATOR,
+                'source_complete': False,
+            },
+            'generated_candidates': 0,
+            'hashcat_confirmed_candidates': 0,
+            'checkpointed_candidates': 0,
+            'confirmed_batches': 0,
+            'source_complete': False,
+        }
+        base_generation = dict(checkpoint['generation'])
+        base_generated_candidates = checkpoint['generated_candidates']
+        progress = {'hashcat_confirmed_candidates': checkpoint['hashcat_confirmed_candidates']}
+        stream = candidates.WordlistCandidates(
+            wordlist, context.candidates.ssid_config,
+            start_offset=checkpoint['cursor']['byte_offset'])
         try:
-            outcome.password = tools.recover_candidate_batches(
-                record, stream, context.tools, env, work)
+            stream.validate_cursor(source_complete=checkpoint['source_complete'])
+            outcome.password = _recover_transformed_wordlist(
+                record, context, stream, checkpoint_path, checkpoint_identity, checkpoint, progress)
         finally:
-            outcome.generation = dict(stream.stats)
+            stream.close()
+            generation = _combined_generation(base_generation, stream.stats)
+            generation.update(
+                generated_candidates=base_generated_candidates + stream.stats['eligible'],
+                hashcat_confirmed_candidates=progress['hashcat_confirmed_candidates'],
+                checkpointed_candidates=checkpoint['checkpointed_candidates'],
+                confirmed_batches=checkpoint['confirmed_batches'])
+            outcome.generation = generation
             print('  Wordlist profile counts: ' + json.dumps(outcome.generation, sort_keys=True), flush=True)
         outcome.status = ('recovered' if outcome.password is not None else
                   'no_eligible_candidates' if not outcome.generation['eligible'] else 'wordlist_exhausted')
@@ -135,9 +256,15 @@ def process_capture(path, context, counts):
                 store.clear(error)
                 counts['skipped_' + previous['status']] += 1
                 continue
+            checkpoint_path, checkpoint_identity, checkpoint = None, None, None
+            if wordlist_profile:
+                checkpoint_identity = _checkpoint_identity(record, wordinfo, rules_info)
+                checkpoint_path = store.checkpoint_path(record_id, attempt_key)
+                checkpoint = storage.read_checkpoint(checkpoint_path, checkpoint_identity)
             print(f'  Attempting {record_id[:12]}: SSID={json.dumps(record["ssid"])} BSSID={record["bssid"]}', flush=True)
             attempt_started = time.monotonic()
-            attempt_record(record, context, outcome)
+            attempt_record(record, context, outcome, checkpoint_path,
+                           checkpoint_identity, checkpoint)
             status, password, generation = outcome.status, outcome.password, outcome.generation
             result = storage.result_base(status, source, wordinfo, rules_info)
             result['candidate_source'] = candidate_source
@@ -210,9 +337,10 @@ def run(config):
                     if prepared.wordlist_profile:
                         print(f'Applying profile to wordlist entries in temporary candidate batches: '
                               f'up to {prepared.rules_info["maximum_generated"]:,} combinations per entry '
-                              f'before deduplication. Initial batch: {tools.INITIAL_CANDIDATE_BATCH:,}; '
-                              f'later batches target about {tools.CANDIDATE_BATCH_TARGET_SECONDS}s from '
-                              f'measured throughput (maximum {tools.MAX_CANDIDATE_BATCH:,}).', flush=True)
+                              f'before deduplication. Initial batch target: {INITIAL_CANDIDATE_BATCH:,}; '
+                              f'later batches target about {CANDIDATE_BATCH_TARGET_SECONDS}s total '
+                              f'generation, file-writing, and Hashcat time (maximum '
+                              f'{MAX_CANDIDATE_BATCH:,} candidates plus one source word).', flush=True)
                 elif prepared.native_rules:
                     tools.validate_rules(tool_config, prepared.rules_info, env, work)
                 else:
@@ -260,7 +388,9 @@ def run(config):
                 print('Summary: ' + json.dumps(dict(counts), sort_keys=True), flush=True)
                 return BatchResult(1 if counts['tool_error'] else 0, dict(counts), stats.records_seen, stats.captures_visited)
     except KeyboardInterrupt:
-        print('\nInterrupted. Completed results are saved; unfinished attempts will restart.', file=sys.stderr)
+        print('\nInterrupted. Completed results are saved. Transformed-wordlist attempts '
+              'resume from their last confirmed checkpoint; other unfinished attempts restart.',
+              file=sys.stderr)
         return BatchResult(130, dict(counts), stats.records_seen, stats.captures_visited)
     except (OSError, ValueError, ToolError, subprocess.TimeoutExpired) as exc:
         print(f'Cannot run batch: {exc}', file=sys.stderr)

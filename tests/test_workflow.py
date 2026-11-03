@@ -11,9 +11,10 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from pwnabase import tools, workflow
+from pwnabase import candidates, storage, tools, workflow
 from pwnabase.config import RunConfig, ROOT
 
 
@@ -27,7 +28,7 @@ class WorkflowTests(unittest.TestCase):
         self.words = self.root / 'words.txt'
         self.words.write_bytes(b'testpass123\n')
         self.tool = self.root / 'fixture-tool'
-        self.tool.write_text('#!' + sys.executable + '\n' + '''import os, pathlib, sys, time
+        self.tool.write_text('#!' + sys.executable + '\n' + '''import hashlib, os, pathlib, sys, time
 args = sys.argv[1:]
 if '--version' in args:
     print('synthetic tool 1')
@@ -45,6 +46,19 @@ elif '--stdin-timeout-abort=0' in args:
     sys.stdin.buffer.read(1)
     sys.exit(1)
 else:
+    calls_path = os.environ.get('PWNABASE_TEST_HASHCAT_CALLS')
+    if calls_path:
+        calls = pathlib.Path(calls_path)
+        count = int(calls.read_text()) + 1 if calls.exists() else 1
+        calls.write_text(str(count))
+        batch_log = os.environ.get('PWNABASE_TEST_BATCH_LOG')
+        if batch_log and not any('self-test.txt' in arg for arg in args):
+            batch = pathlib.Path(args[args.index('--outfile') + 3]).read_bytes()
+            with open(batch_log, 'a') as log:
+                log.write(str(len(batch.splitlines())) + ' ' + hashlib.sha256(batch).hexdigest() + '\\n')
+        if os.environ.get('PWNABASE_TEST_BLOCK_HASHCAT_CALL') == str(count):
+            pathlib.Path(os.environ['PWNABASE_TEST_HASHCAT_MARKER']).write_text(str(count))
+            time.sleep(30)
     outfile = pathlib.Path(args[args.index('--outfile') + 1])
     lines = pathlib.Path(args[args.index('--outfile') + 3]).read_bytes().splitlines()
     words = [bytes.fromhex(line.decode()) for line in lines] if '--hex-wordlist' in args else lines
@@ -128,9 +142,152 @@ else:
         self.assertEqual(exhausted['status'], 'wordlist_exhausted')
         self.assertTrue(exhausted['candidate_generation']['source_complete'])
         self.assertEqual(exhausted['candidate_generation']['eligible'], 76_800)
-        self.assertIn('Candidate batch 1 complete: 65,536 candidates', log.getvalue())
-        self.assertIn('Candidate batch 2 complete: 11,264 candidates', log.getvalue())
+        self.assertIn('Candidate batch 1 complete: 69,120 candidates', log.getvalue())
+        self.assertIn('Candidate batch 2 complete: 7,680 candidates', log.getvalue())
         self.assertEqual(list((output / 'tool-error').glob('*.json')), [])
+
+    def test_interrupted_transformed_wordlist_resumes_after_confirmed_batches(self):
+        (self.captures / 'capture.pcap').write_text(tools.synthetic_record() + '\n')
+        self.words.write_bytes(b'unrelatedfixture\n' * 9 + b'testpass123\n')
+        output = self.root / 'out'
+        calls, marker = self.root / 'hashcat-calls', self.root / 'blocked-batch'
+        batch_log = self.root / 'batch-log'
+        env = os.environ.copy()
+        env.update(PWNABASE_TEST_HASHCAT_CALLS=str(calls),
+                   PWNABASE_TEST_BLOCK_HASHCAT_CALL='3',
+                   PWNABASE_TEST_HASHCAT_MARKER=str(marker),
+                   PWNABASE_TEST_BATCH_LOG=str(batch_log))
+        command = self.command(output) + ['--ssid-rules']
+        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                   text=True, env=env)
+        try:
+            deadline = time.monotonic() + 10
+            while not marker.exists() and process.poll() is None and time.monotonic() < deadline:
+                time.sleep(.02)
+            if not marker.exists():
+                stdout, stderr = process.communicate(timeout=2)
+                self.fail('synthetic Hashcat did not reach the interrupted batch; '
+                          f'exit={process.returncode}\nstdout={stdout}\nstderr={stderr}')
+            process.send_signal(signal.SIGINT)
+            stdout, stderr = process.communicate(timeout=10)
+            self.assertEqual(process.returncode, 130, stdout + stderr)
+            self.assertIn('Interrupted.', stderr)
+        finally:
+            if process.poll() is None:
+                process.send_signal(signal.SIGINT)
+                process.communicate(timeout=10)
+            process.stdout.close()
+            process.stderr.close()
+
+        checkpoints = list((output / '.pwnabase' / 'checkpoints').glob('*.json'))
+        self.assertEqual(len(checkpoints), 1)
+        checkpoint = json.loads(checkpoints[0].read_text())
+        self.assertEqual(checkpoint['cursor']['byte_offset'],
+                         len(b'unrelatedfixture\n' * 9))
+        self.assertEqual(checkpoint['hashcat_confirmed_candidates'], 69_120)
+        self.assertEqual(checkpoint['checkpointed_candidates'], 69_120)
+        self.assertFalse(checkpoint['source_complete'])
+        self.assertEqual(calls.read_text(), '3')
+        self.assertEqual(list((output / '.pwnabase').glob('work-*')), [])
+        self.assertEqual(list((output / 'complete').glob('*.json')), [])
+
+        env.pop('PWNABASE_TEST_BLOCK_HASHCAT_CALL')
+        resumed = subprocess.run(command, capture_output=True, text=True, timeout=20, env=env)
+        self.assertEqual(resumed.returncode, 0, resumed.stdout + resumed.stderr)
+        self.assertIn('Resuming transformed wordlist', resumed.stdout)
+        self.assertEqual(calls.read_text(), '5')
+        batches = batch_log.read_text().splitlines()
+        self.assertEqual(batches[0].split()[0], '69120')
+        self.assertEqual(batches[1], batches[2])  # Interrupted batch is replayed byte for byte.
+        self.assertEqual(batches[2].split()[0], '7680')
+        success = json.loads(next((output / 'complete').glob('*.json')).read_text())
+        self.assertEqual(success['password'], 'testpass123')
+        self.assertEqual(success['candidate_generation']['source_complete'], True)
+        self.assertEqual(list((output / 'tool-error').glob('*.json')), [])
+
+    def test_bad_checkpoints_are_preserved_and_other_records_continue(self):
+        lines = [tools.synthetic_record(ssid=name) for name in
+                 (b'first-network', b'second-network', b'third-network', b'fourth-network')]
+        (self.captures / 'capture.pcap').write_text('\n'.join(lines) + '\n')
+        output = self.root / 'out'
+        info, _ = candidates.load_profile(ROOT / 'rules/ssid.json')
+        wordinfo = {'path': str(self.words.resolve()), 'label': 'words',
+                    'sha256': storage.fingerprint(self.words)}
+        store = storage.ResultStore(output)
+        paths = []
+        for line in lines[:3]:
+            record = tools.parse_record(line)
+            _, attempt_key, _ = candidates.attempt_identity(record, wordinfo, info, False, True)
+            paths.append(store.checkpoint_path(record['record_id'], attempt_key))
+        paths[0].parent.mkdir(parents=True)
+        paths[0].write_text('{invalid json')
+        paths[1].write_text(json.dumps({'schema_version': 1, 'identity': {'record_id': 'wrong'}}))
+        paths[2].write_text('null')
+        originals = [path.read_bytes() for path in paths]
+        with contextlib.redirect_stdout(io.StringIO()):
+            result = workflow.run(replace(self.config(output), ssid_rules=True))
+        self.assertEqual(result.exit_code, 1)
+        self.assertEqual(result.counts, {'tool_error': 3, 'recovered': 1})
+        self.assertEqual([path.read_bytes() for path in paths], originals)
+        self.assertEqual(len(list((output / 'tool-error').glob('*.json'))), 3)
+        self.assertEqual(len(list((output / 'complete').glob('*.json'))), 1)
+
+    def test_resumed_attempt_exhausts_only_after_replaying_interrupted_batch(self):
+        (self.captures / 'capture.pcap').write_text(tools.synthetic_record() + '\n')
+        self.words.write_bytes(b'unrelatedfixture\n' * 10)
+        output = self.root / 'out'
+        calls, marker, batch_log = (self.root / name for name in ('calls', 'marker', 'batches'))
+        env = os.environ.copy()
+        env.update(PWNABASE_TEST_HASHCAT_CALLS=str(calls),
+                   PWNABASE_TEST_BLOCK_HASHCAT_CALL='3',
+                   PWNABASE_TEST_HASHCAT_MARKER=str(marker),
+                   PWNABASE_TEST_BATCH_LOG=str(batch_log))
+        command = self.command(output) + ['--ssid-rules']
+        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                   text=True, env=env)
+        try:
+            deadline = time.monotonic() + 10
+            while not marker.exists() and process.poll() is None and time.monotonic() < deadline:
+                time.sleep(.02)
+            self.assertTrue(marker.exists(), 'synthetic Hashcat did not reach the second batch')
+            process.send_signal(signal.SIGINT)
+            process.communicate(timeout=10)
+            self.assertEqual(process.returncode, 130)
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.communicate(timeout=10)
+            process.stdout.close()
+            process.stderr.close()
+        self.assertEqual(list((output / 'exhausted').rglob('*.json')), [])
+        env.pop('PWNABASE_TEST_BLOCK_HASHCAT_CALL')
+        resumed = subprocess.run(command, capture_output=True, text=True, timeout=20, env=env)
+        self.assertEqual(resumed.returncode, 0, resumed.stdout + resumed.stderr)
+        exhausted = json.loads(next((output / 'exhausted/words').glob('*.json')).read_text())
+        self.assertEqual(exhausted['candidate_generation']['hashcat_confirmed_candidates'], 76800)
+        self.assertEqual(exhausted['candidate_generation']['checkpointed_candidates'], 76800)
+        batches = batch_log.read_text().splitlines()
+        self.assertEqual([row.split()[0] for row in batches], ['69120', '7680', '7680'])
+        self.assertEqual(batches[1], batches[2])
+
+    def test_checkpoint_write_failure_reports_confirmed_without_claiming_checkpoint(self):
+        (self.captures / 'capture.pcap').write_text(tools.synthetic_record() + '\n')
+        self.words.write_bytes(b'unrelatedfixture\n')
+        output = self.root / 'out'
+        original = storage.atomic_json
+        def fail_checkpoint(path, value):
+            if path.parent.name == 'checkpoints':
+                raise OSError('synthetic checkpoint write failure')
+            return original(path, value)
+        with patch.object(storage, 'atomic_json', side_effect=fail_checkpoint):
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                result = workflow.run(replace(self.config(output), ssid_rules=True))
+        self.assertEqual(result.counts, {'tool_error': 1})
+        error = json.loads(next((output / 'tool-error').glob('*.json')).read_text())
+        generation = error['candidate_generation']
+        self.assertEqual(generation['generated_candidates'], 7680)
+        self.assertEqual(generation['hashcat_confirmed_candidates'], 7680)
+        self.assertEqual(generation['checkpointed_candidates'], 0)
 
     def test_exhaustion_filename_matches_pre_refactor_contract(self):
         (self.captures / 'capture.pcap').write_text(tools.synthetic_record() + '\n')

@@ -24,6 +24,28 @@ class WordlistProfileTests(unittest.TestCase):
         self.words = self.root / 'words.txt'
         self.info, self.config = load_profile(ROOT / 'rules/ssid.json')
 
+    def test_batch_cursor_resumes_at_source_word_boundary(self):
+        self.words.write_bytes(b'firstseed\nsecondseed\n')
+        config = dict(accents=['preserve'], cases=['original'], separators=[''],
+                      substitutions=[{}], numbers=[''], punctuation=[''])
+        first = WordlistCandidates(self.words, config)
+        batch = first.next_batch(self.root, 1)
+        self.assertEqual(batch.path.read_bytes(), b'666972737473656564\n')
+        self.assertEqual(batch.next_offset, len(b'firstseed\n'))
+        self.assertFalse(batch.source_complete)
+        batch.path.unlink()
+        first.close()
+        resumed = WordlistCandidates(self.words, config, batch.next_offset)
+        resumed.validate_cursor()
+        second = resumed.next_batch(self.root, 1)
+        self.assertEqual(second.path.read_bytes(), b'7365636f6e6473656564\n')
+        self.assertTrue(second.source_complete)
+        second.path.unlink()
+        resumed.close()
+        invalid = WordlistCandidates(self.words, config, 2)
+        with self.assertRaisesRegex(ValueError, 'line boundary'):
+            invalid.validate_cursor()
+
     def test_streaming_is_hex_safe_deduplicates_per_seed_and_accepts_longer_seeds(self):
         # CRLF is a line ending; spaces and other bytes are retained.
         self.words.write_bytes('só casa\r\nsó casa\n'.encode() + b'\xffabcdefg\n' + b'longer-than-thirty-two-characters-wordlist-entry\n')

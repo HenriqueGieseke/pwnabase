@@ -3,9 +3,11 @@
 from dataclasses import dataclass
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import shutil
+import tempfile
 
 from . import storage
 from .tools import ToolError
@@ -156,21 +158,107 @@ def source_info(ssid):
                 sha256=hashlib.sha256(ssid).hexdigest(), generator=GENERATOR)
 
 
+@dataclass(frozen=True)
+class CandidateBatch:
+    path: Path
+    candidate_count: int
+    next_offset: int
+    source_complete: bool
+
+
 class WordlistCandidates:
-    """Produce hex-encoded chunks, retaining at most one seed's candidates.
+    """Produce bounded hex batches and retain a resumable wordlist cursor.
 
     Deduplication is per seed; duplicates across different wordlist entries are
-    intentionally retained so memory does not grow with the whole wordlist.
+    intentionally retained. A batch ends only after a whole source word, so
+    its byte offset can resume at a stable wordlist line boundary.
     """
-    def __init__(self, path, config):
+    def __init__(self, path, config, start_offset=0):
         self.path, self.config = path, config
+        self.cursor = start_offset
+        self._source = None
         self.stats = dict(seeds=0, generated=0, duplicates=0, rejected_length=0,
                           eligible=0, non_utf8_seeds=0, source_complete=False,
                           generator=WORDLIST_GENERATOR)
 
+    def _open_source(self):
+        if self._source is not None:
+            return
+        self._source = self.path.open('rb')
+        size = os.fstat(self._source.fileno()).st_size
+        if (type(self.cursor) is not int or self.cursor < 0 or self.cursor > size):
+            self.close()
+            raise ValueError('Checkpoint cursor is outside the current wordlist')
+        if self.cursor not in {0, size}:
+            self._source.seek(self.cursor - 1)
+            if self._source.read(1) != b'\n':
+                self.close()
+                raise ValueError('Checkpoint cursor is not at a wordlist line boundary')
+        self._source.seek(self.cursor)
+
+    def validate_cursor(self, source_complete=False):
+        self._open_source()
+        size = os.fstat(self._source.fileno()).st_size
+        if source_complete and self.cursor != size:
+            self.close()
+            raise ValueError('Completed checkpoint does not point to the end of the wordlist')
+
+    def next_batch(self, work, candidate_limit):
+        if candidate_limit < 1:
+            raise ValueError('Candidate batch limit must be positive')
+        if self.stats['source_complete']:
+            return None
+        self._open_source()
+        descriptor, filename = tempfile.mkstemp(prefix='candidates-', suffix='.hex', dir=work)
+        batch_path = Path(filename)
+        count = 0
+        keep_file = False
+        try:
+            with os.fdopen(descriptor, 'wb') as batch_file:
+                while count < candidate_limit:
+                    line = self._source.readline()
+                    if not line:
+                        self.stats['source_complete'] = True
+                        break
+                    next_offset = self._source.tell()
+                    seed = line[:-1] if line.endswith(b'\n') else line
+                    if seed.endswith(b'\r') and line.endswith(b'\n'):
+                        seed = seed[:-1]
+                    generated, counts = generate(seed, self.config)
+                    self.stats['seeds'] += 1
+                    self.stats['non_utf8_seeds'] += not counts['valid_utf8']
+                    for key in ('generated', 'duplicates', 'rejected_length', 'eligible'):
+                        self.stats[key] += counts[key]
+                    for candidate in generated:
+                        batch_file.write(candidate.hex().encode('ascii') + b'\n')
+                    count += len(generated)
+                    self.cursor = next_offset
+
+                if count >= candidate_limit and not self.stats['source_complete']:
+                    next_offset = self._source.tell()
+                    if not self._source.readline():
+                        self.stats['source_complete'] = True
+                    self._source.seek(next_offset)
+
+            if not count:
+                if not self.stats['source_complete']:
+                    raise ValueError('Candidate source ended before generation completed')
+                return None
+            keep_file = True
+            return CandidateBatch(batch_path, count, self.cursor, self.stats['source_complete'])
+        finally:
+            if not keep_file:
+                batch_path.unlink(missing_ok=True)
+
+    def close(self):
+        if self._source is not None:
+            self._source.close()
+            self._source = None
+
     def __call__(self, stop):
         buffer = bytearray()
         with self.path.open('rb') as stream:
+            stream.seek(self.cursor)
             for line in stream:
                 if stop.is_set():
                     return
