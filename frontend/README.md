@@ -49,6 +49,10 @@ wordlists from **SSID** experiments. SSID outcomes include `candidates_exhausted
 and `no_eligible_candidates`; both are valid completed outcomes. File details
 show generation counts when present, and the rules sheet displays SSID profile
 stages and their configuration alongside ordinary native rule catalogs.
+When an SSID profile is applied to a wordlist through `--ssid-rules`, the source
+remains the actual wordlist. Its rule-set column identifies the selected profile,
+and generation details show seeds, non-UTF-8 entries and source completion where
+available. Partial generation counts after early recovery are not tested totals.
 
 The active sheet refreshes every five seconds. Metadata is checked sequentially,
 and unchanged JSON contents are reused from memory. Updates preserve filters,

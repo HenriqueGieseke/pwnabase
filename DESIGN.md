@@ -41,6 +41,17 @@ Check shared dependencies before processing. Individual capture errors must not 
 
 ### SSID-derived mode
 
+The same SSID profile can be applied to file-wordlist entries using
+`--ssid-rules` (SambaTu by default) or by selecting an SSID-profile JSON with
+`--rules`. This is distinct from `--ssid`, which continues to use each network's
+own name. Stream hex-encoded candidates to Hashcat with bounded buffers and
+per-entry generation/deduplication; do not materialize an expanded wordlist.
+Record the actual wordlist, profile and streaming-generator identity, with a
+separate attempt filename identity. Preserve completed results and classify
+generation failures as errors. Exhaustion requires the source to finish; early
+recovery may record partial generation counts. Keep this mode opt-in because
+the profile can greatly multiply work, and stdin totals/ETA are unavailable.
+
 Add a separate opt-in candidate-source mode using only the SSID associated with each authentication record. Preserve the default wordlist workflow. Preserve the exact SSID bytes already stored in `ssid_hex`; the display string can contain replacement characters and must not silently become the seed.
 
 Agreed transformation coverage:

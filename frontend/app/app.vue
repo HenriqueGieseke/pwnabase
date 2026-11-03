@@ -110,6 +110,7 @@ watch(() => [active.value, view.value.search, view.value.hideDuplicates, view.va
 })
 onMounted(() => { load(); timer = setInterval(() => load(), 5000) })
 onUnmounted(() => { clearTimeout(debounce); clearInterval(timer); controller?.abort() })
+const generationFields = computed(() => ['seeds', 'generated', 'duplicates', 'rejected_length', 'eligible', 'non_utf8_seeds', 'valid_utf8', 'source_complete'].filter(key => Object.hasOwn(detail.value?.data?.candidate_generation || {}, key)))
 const raw = computed(() => JSON.stringify(detail.value?.data, null, 2))
 const ruleObjects = computed(() => Array.isArray(detail.value?.data?.rules) ? detail.value.data.rules.filter(rule => rule && typeof rule === 'object') : [])
 </script>
@@ -155,7 +156,7 @@ const ruleObjects = computed(() => Array.isArray(detail.value?.data?.rules) ? de
               <dl v-if="detail.data && active !== 'rules'"><template v-for="key in ['bssid', 'kind', 'wordlist', 'ruleSet', 'updated']" :key="key"><dt>{{ { bssid: 'BSSID', kind: 'Record type', wordlist: 'Candidate source', ruleSet: 'Rule set', updated: 'Updated' }[key] }}</dt><dd>{{ cell(detail.row, key) || '—' }}</dd></template><template v-if="active === 'complete'"><dt>Password</dt><dd class="password mono">{{ cell(detail.row, 'password') || '—' }}</dd></template></dl>
               <div v-if="active === 'rules' && detail.data" class="catalog-intro"><p>{{ detail.data.description }}</p><span>{{ ruleObjects.length }} transformation stages / rules</span></div>
               <section v-if="Array.isArray(detail.data?.sources) && detail.data.sources.length" class="source-list"><h4>CAPTURE PROVENANCE · {{ detail.data.sources.length }}</h4><article v-for="(source, index) in detail.data.sources" :key="index"><p>{{ source?.path || 'Unknown source path' }}</p><code v-if="source?.sha256">SHA-256 {{ source.sha256 }}</code></article></section>
-              <section v-if="detail.data?.candidate_generation" class="generation"><h4>CANDIDATE GENERATION</h4><dl><template v-for="key in ['generated', 'duplicates', 'rejected_length', 'eligible', 'valid_utf8']" :key="key"><dt>{{ key.replaceAll('_', ' ') }}</dt><dd>{{ detail.data.candidate_generation[key] }}</dd></template></dl></section>
+              <section v-if="detail.data?.candidate_generation" class="generation"><h4>CANDIDATE GENERATION</h4><dl><template v-for="key in generationFields" :key="key"><dt>{{ key.replaceAll('_', ' ') }}</dt><dd>{{ detail.data.candidate_generation[key] }}</dd></template></dl></section>
               <section v-if="ruleObjects.length" class="rule-list"><h4>TRANSFORMATIONS · {{ ruleObjects.length }}</h4><article v-for="rule in ruleObjects" :key="rule.id"><code>{{ rule.expression || rule.operation }}</code><pre v-if="rule.operation" class="profile-config">{{ JSON.stringify(Object.fromEntries(Object.entries(rule).filter(([key]) => !['id', 'description', 'operation'].includes(key))), null, 2) }}</pre><strong>{{ rule.id }}</strong><p>{{ rule.description }}</p></article></section>
               <details v-if="detail.data" class="raw"><summary>Raw JSON <span>{ }</span></summary><pre>{{ raw }}</pre></details>
             </template>

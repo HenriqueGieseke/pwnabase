@@ -5,6 +5,8 @@ import json
 import re
 import unicodedata
 
+WORDLIST_GENERATOR = 'wordlist-profile-v1'
+
 
 GENERATOR = 'ssid-v1'
 CASES = {'original', 'lower', 'upper', 'title', 'invert_first', 'lower_first_upper_rest'}
@@ -82,7 +84,7 @@ def load_profile(path):
     identity = dict(generator=GENERATOR, unicode_version=unicodedata.unidata_version, config=config)
     digest = hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
     return dict(catalog, path=str(path), sha256=digest, generator=GENERATOR,
-                unicode_version=unicodedata.unidata_version), config
+                unicode_version=unicodedata.unidata_version, maximum_generated=maximum), config
 
 
 def case_variant(tokens, separator, mode):
@@ -146,3 +148,44 @@ def generate(ssid, config):
 def source_info(ssid):
     return dict(type='ssid', label='SSID', ssid_hex=ssid.hex(),
                 sha256=hashlib.sha256(ssid).hexdigest(), generator=GENERATOR)
+
+
+class WordlistCandidates:
+    """Produce hex-encoded chunks, retaining at most one seed's candidates.
+
+    Deduplication is per seed; duplicates across different wordlist entries are
+    intentionally retained so memory does not grow with the whole wordlist.
+    """
+    def __init__(self, path, config):
+        self.path, self.config = path, config
+        self.stats = dict(seeds=0, generated=0, duplicates=0, rejected_length=0,
+                          eligible=0, non_utf8_seeds=0, source_complete=False,
+                          generator=WORDLIST_GENERATOR)
+
+    def __call__(self, stop):
+        buffer = bytearray()
+        with self.path.open('rb') as stream:
+            for line in stream:
+                if stop.is_set():
+                    return
+                # Match ordinary LF/CRLF wordlist records, preserving other bytes.
+                seed = line[:-1] if line.endswith(b'\n') else line
+                if seed.endswith(b'\r') and line.endswith(b'\n'):
+                    seed = seed[:-1]
+                candidates, counts = generate(seed, self.config)
+                self.stats['seeds'] += 1
+                self.stats['non_utf8_seeds'] += not counts['valid_utf8']
+                for key in ('generated', 'duplicates', 'rejected_length', 'eligible'):
+                    self.stats[key] += counts[key]
+                for candidate in candidates:
+                    if stop.is_set():
+                        return
+                    buffer.extend(candidate.hex().encode('ascii') + b'\n')
+                    if len(buffer) >= 65536:
+                        yield bytes(buffer)
+                        buffer.clear()
+                del candidates
+        if buffer and not stop.is_set():
+            yield bytes(buffer)
+        if not stop.is_set():
+            self.stats['source_complete'] = True

@@ -90,6 +90,51 @@ The agreed scope is recorded in [DESIGN.md](DESIGN.md), with domain terms in [GL
 
 ## SSID-derived experiments
 
+To apply these same transformations to the **default SambaTu wordlist**, use:
+
+```bash
+python3 recover.py --ssid-rules
+```
+
+For another wordlist, or an explicitly selected profile:
+
+```bash
+python3 recover.py --wordlist data/wordlists/wordlist-br/wordlist-br.txt --ssid-rules
+python3 recover.py --rules rules/ssid.json
+python3 recover.py --ssid-rules --rules rules/ssid.json --check
+```
+
+`--ssid-rules` selects the default SSID profile but keeps wordlist entries as the
+seeds. Selecting an SSID-profile JSON with `--rules` also enables this behavior.
+The profile's transformations are identical to SSID mode, but wordlist entries
+are not limited to 32 bytes. `--ssid-rules` cannot be combined with `--ssid` or
+`--preview-ssid`. Ordinary native catalogs such as `--rules rules/basic.json`
+continue to use Hashcat's native rules as before.
+
+Candidates stream to Hashcat's stdin in hex-encoded buffers of about 64 KB;
+the script holds at most one entry's generated candidate collection at a time.
+No expanded wordlist is saved to disk. LF/CRLF line endings are removed from the
+input entries; other bytes are preserved. Invalid UTF-8 entries contribute only
+their exact original bytes. Deduplication is **per entry**, so candidates shared
+by different source entries can still be tried multiple times. Generation counts
+reflect that policy. When recovery finishes early, counts cover the generated
+prefix and `source_complete` may be false; generated does not mean tested.
+
+The full default profile has an upper bound of **115,201 combinations per word**
+before deduplication. Applying it to millions of words can generate hundreds of
+billions of combinations. Streaming limits memory and disk growth, not total
+work, and Python generation may limit GPU throughput. Test a small list first.
+Hashcat's stdin mode does not provide a reliable total candidate count or ETA;
+logs show generation progress alongside available Hashcat status instead.
+
+These results remain under `exhausted/<wordlist-label>/`, with the actual wordlist
+and profile recorded. Attempt filenames include a distinct streaming-generation
+identity, so plain/native-rule exhaustion and own-SSID exhaustion cannot suppress
+this experiment. Completed streams with no match use `wordlist_exhausted`; zero
+eligible candidates use `no_eligible_candidates`. Producer/read errors and
+premature exhaustion are tool errors, never successful exhaustion. Original
+wordlists and the default `python3 recover.py` behavior remain unchanged.
+
 Use each authentication record's own network name as the candidate source:
 
 ```bash
