@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import tempfile
 import uuid
 
@@ -111,6 +112,24 @@ def read_checkpoint(path, identity):
     if not isinstance(checkpoint.get('updated_at'), str):
         raise CheckpointError('Checkpoint timestamp is invalid; saved state was preserved')
     return checkpoint
+
+
+def checkpoint_entries(output, generator):
+    """Yield valid saved checkpoints or None for an unreadable entry, without changing state."""
+    directory = output / '.pwnabase' / 'checkpoints'
+    for path in sorted(directory.glob('*.json')) if directory.is_dir() else []:
+        try:
+            saved = read_json(path)
+            identity = saved.get('identity') if isinstance(saved, dict) else None
+            if (not isinstance(identity, dict) or any(
+                    not isinstance(identity.get(key), str)
+                    or not re.fullmatch(r'[0-9a-f]{64}', identity[key])
+                    for key in ('record_id', 'wordlist_sha256', 'profile_sha256'))
+                    or identity.get('generator') != generator):
+                raise CheckpointError('Invalid checkpoint identity')
+            yield read_checkpoint(path, identity)
+        except (OSError, ValueError, TypeError, KeyError):
+            yield None
 
 
 def add_source(result, source):

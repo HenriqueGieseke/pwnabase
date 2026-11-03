@@ -19,6 +19,7 @@ class RunConfig:
     retry_unusable: bool = False
     restart_incomplete: bool = False
     check: bool = False
+    status: bool = False
     device_types: str = '2'
     progress_interval: int = 10
     hashcat: str = 'hashcat'
@@ -26,6 +27,8 @@ class RunConfig:
 
     def validate(self):
         ssid = self.ssid or self.preview_ssid is not None
+        if self.status and (self.check or self.preview_ssid is not None or self.restart_incomplete):
+            raise ValueError('--status cannot be combined with --check, --preview-ssid or --restart-incomplete')
         if self.progress_interval < 0:
             raise ValueError('--progress-interval must be nonnegative')
         if self.preview_limit < 1:

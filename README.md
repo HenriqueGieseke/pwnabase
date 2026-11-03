@@ -75,6 +75,11 @@ Each batch snapshots its wordlist and each capture before processing. Original c
 
 To deliberately restart matching incomplete transformed-wordlist attempts, add `--restart-incomplete` to the same recovery command. The previous checkpoint is backed up; completed and historical results remain in place.
 
+Run `python3 recover.py --status` in a second terminal to inspect saved
+transformed-wordlist checkpoints without interrupting a running batch. It reports
+only confirmed, saved progress; work in the current batch may not appear yet. Use
+the same `--output` option as the batch if results are stored elsewhere.
+
 Missing shared dependencies or an unusable compute backend stop the batch during preflight. Individual extraction or recovery errors are recorded and processing continues. A failure to write the output itself can prevent further processing.
 
 Exit codes: `0` means the batch completed without tool errors (exhaustion and unusable captures are valid outcomes); `1` means individual tool errors occurred; `2` means startup or shared infrastructure failed; `130` means interrupted.

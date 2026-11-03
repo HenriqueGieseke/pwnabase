@@ -413,6 +413,54 @@ else:
         result = json.loads(next((output / 'complete').glob('*.json')).read_text())
         self.assertEqual(result['password'], 'testpass123')
 
+    def test_status_is_read_only_while_batch_lock_is_held(self):
+        output = self.root / 'out'
+        runtime = output / '.pwnabase'
+        checkpoint = runtime / 'checkpoints' / 'synthetic.json'
+        identity = {'record_id': 'a' * 64, 'wordlist_sha256': 'b' * 64,
+                    'profile_sha256': 'c' * 64, 'generator': candidates.WORDLIST_GENERATOR}
+        state = {'schema_version': 1, 'identity': identity, 'cursor': {'byte_offset': 10},
+                 'generation': {'seeds': 1, 'generated': 5, 'duplicates': 1,
+                                'rejected_length': 1, 'eligible': 3, 'non_utf8_seeds': 0,
+                                'generator': candidates.WORDLIST_GENERATOR, 'source_complete': False},
+                 'generated_candidates': 3, 'hashcat_confirmed_candidates': 3,
+                 'checkpointed_candidates': 3, 'confirmed_batches': 1,
+                 'source_complete': False, 'updated_at': '2026-01-01T00:00:00+00:00'}
+        storage.atomic_json(checkpoint, state)
+        invalid = checkpoint.parent / 'broken.json'
+        invalid.write_text('sensitive-fixture-not-json')
+        original = {p: p.read_bytes() for p in (checkpoint, invalid)}
+        with (runtime / 'batch.lock').open('w') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            result = subprocess.run([sys.executable, str(ROOT / 'recover.py'), '--status',
+                                     '--output', str(output), '--hashcat', 'missing-tool',
+                                     '--extractor', 'missing-tool'], capture_output=True,
+                                    text=True, timeout=10)
+        self.assertNotEqual(result.returncode, 2, result.stderr)
+        self.assertIn('checkpointed', result.stdout.lower())
+        self.assertIn('3', result.stdout)
+        self.assertIn('invalid', (result.stdout + result.stderr).lower())
+        self.assertNotIn('sensitive-fixture-not-json', result.stdout + result.stderr)
+        self.assertEqual({p: p.read_bytes() for p in original}, original)
+
+    def test_generation_progress_is_periodic_and_does_not_reveal_seeds(self):
+        (self.captures / 'capture.pcap').write_text(tools.synthetic_record() + '\n')
+        self.words.write_bytes(b'secret-fixture-word\n')
+        original_generate = candidates.generate
+        def slow_generate(seed, config):
+            time.sleep(1.1)
+            return original_generate(seed, config)
+        for interval in (1, 0):
+            log = io.StringIO()
+            with self.subTest(interval=interval), patch.object(candidates, 'generate', side_effect=slow_generate):
+                with contextlib.redirect_stdout(log):
+                    result = workflow.run(replace(self.config(self.root / f'out-{interval}'),
+                                                  ssid_rules=True, progress_interval=interval))
+                self.assertEqual(result.exit_code, 0)
+                self.assertEqual('Generating (completed source words)' in log.getvalue(), bool(interval))
+                self.assertNotIn('secret-fixture-word', log.getvalue())
+                self.assertNotIn('testpass123', log.getvalue())
+
     def test_exhaustion_filename_matches_pre_refactor_contract(self):
         (self.captures / 'capture.pcap').write_text(tools.synthetic_record() + '\n')
         # Preflight must still recover its fixed known password; target attempts
