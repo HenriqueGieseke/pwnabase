@@ -99,6 +99,46 @@ Use existing tests and focused additional checks for risky behavior such as canc
 
 Offline notebook operation and synchronization remain future design questions. The modular workflow must not assume that the notebook always has connectivity to the Dell.
 
+## Repository checks and commit guardrail (planning)
+
+Build one fail-fast repository check runner and a local pre-commit hook. Keep
+GitHub Actions, branch protection and changes to the direct-to-main workflow out
+of this first version. Ordinary checks require Python compilation, ordinary
+Python tests, frontend result-reader tests and whitespace checks. Stop on the
+first failed check; hook invocation must block the commit on failure.
+
+Real Hashcat/extractor integrations require an explicit option and are excluded
+from automatic pre-commit execution. Missing required dependencies are failures
+with actionable messages. Checks must not install/download dependencies, format
+code, change staged content, or automatically fix files. Use synthetic fixtures
+and preserve real captures, wordlists, runtime state and saved results.
+
+The pre-commit hook tests a temporary export of the Git index so partially staged
+files are checked as they will be committed. Do not stash or rewrite the working
+tree or index. Track the hook in the repository and provide an explicit installer
+that enables it for this checkout; stop rather than overwrite an existing
+different hook configuration.
+
+Prefer an existing project-local compatible Node runtime, otherwise a compatible
+Node from PATH. Use the selected runtime consistently, including Node subprocesses
+launched by Python tests. Never download a runtime during checks. Support Linux
+only in this version, matching the project's existing POSIX test dependencies.
+
+Expose `./scripts/check` for current working files and `./scripts/check --staged`
+for the staged snapshot. The hook always uses staged mode. Working-file mode
+reports staged and unstaged whitespace errors; staged mode checks staged
+whitespace only, allowing unrelated unfinished edits to remain in the working
+tree. Run all required fast checks for each hook invocation. Ignore an inherited
+RUN_REAL_TOOLS setting for ordinary checks; enable real integrations only through
+an explicit manual option.
+
+After implementation tests pass, install and verify the hook in this checkout.
+Future clones enable it explicitly. Keep normal Git hook bypass behavior and
+document the local enforcement limit; do not add a custom bypass mechanism.
+On interruption or failure, stop checks, abort the commit when invoked as a hook,
+and clean up temporary snapshots. Provide clear stage/failure output and preserve
+the failing command's useful diagnostics.
+
 ## Development prerequisite
 
 Install and verify Hashcat locally before starting implementation, so development and testing can use the real tool. Install hcxpcapngtool for capture extraction as well. Synthetic-only validation is insufficient for the requested development workflow.

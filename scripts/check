@@ -1,0 +1,164 @@
+#!/usr/bin/env python3
+"""Linux repository checks. No downloads, fixes, or production-data processing."""
+
+import argparse
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+
+
+class CheckFailure(Exception):
+    def __init__(self, message, code=1):
+        super().__init__(message)
+        self.code = code
+
+
+class Interrupted(Exception):
+    def __init__(self, signum):
+        self.signum = signum
+
+
+def interrupt(signum, frame):
+    raise Interrupted(signum)
+
+
+def command(argv, cwd, env, capture=False):
+    process = subprocess.Popen(argv, cwd=cwd, env=env, start_new_session=True,
+                               stdout=subprocess.PIPE if capture else None, text=True)
+    try:
+        output, _ = process.communicate()
+        return process.returncode, output or ''
+    except BaseException:
+        # Ignore additional cancellation signals until the child's group is gone.
+        handlers = {sig: signal.signal(sig, signal.SIG_IGN) for sig in (signal.SIGINT, signal.SIGTERM)}
+        try:
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass
+            # A group member may outlive its leader, including one holding an
+            # inherited output pipe open. Reap the group even if wait succeeded.
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.wait()
+        finally:
+            for sig, handler in handlers.items():
+                signal.signal(sig, handler)
+        raise
+
+
+def require(argv, cwd, env, capture=False):
+    code, output = command(argv, cwd, env, capture)
+    if code:
+        raise CheckFailure(f'{Path(argv[0]).name} failed (exit {code})', code if code > 0 else 1)
+    return output
+
+
+def compatible(version, policy):
+    """Support the stable caret/minimum alternatives used by this project's manifest."""
+    alternatives = []
+    for part in policy.split('||'):
+        match = re.fullmatch(r'\s*(\^|>=)(\d+)\.(\d+)\.(\d+)\s*', part)
+        if not match:
+            raise CheckFailure(f'Unsupported Node engine policy: {policy}; update the check runner')
+        operator, *numbers = match.groups()
+        minimum = tuple(map(int, numbers))
+        if operator == '^' and minimum[0] == 0:
+            raise CheckFailure('Node caret policy must use a nonzero major version')
+        alternatives.append(version >= minimum and (operator == '>=' or version[0] == minimum[0]))
+    return any(alternatives)
+
+
+def select_node(root, env):
+    policy = json.loads((root / 'frontend/package.json').read_text())['engines']['node']
+    local = root / 'frontend/.runtime/node_modules/node/bin/node'
+    installed = shutil.which('node', path=env.get('PATH'))
+    for candidate in [str(local), installed]:
+        if not candidate or not os.access(candidate, os.X_OK):
+            continue
+        code, output = command([candidate, '--version'], root, env, capture=True)
+        match = re.fullmatch(r'v(\d+)\.(\d+)\.(\d+)\s*', output)
+        if not code and match and compatible(tuple(map(int, match.groups())), policy):
+            return Path(candidate).absolute()
+    raise CheckFailure(f'No compatible Node found (required: {policy}). Install a compatible runtime before checking; nothing was downloaded.')
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--real-tools', action='store_true', help='Explicitly enable synthetic Hashcat/extractor integrations')
+    args = parser.parse_args()
+    stage = 'prerequisites'
+    started = time.monotonic()
+    try:
+        if sys.platform != 'linux':
+            raise CheckFailure('Repository checks currently support Linux only')
+        if sys.version_info < (3, 10):
+            raise CheckFailure('Python 3.10+ is required; install it before checking')
+        root = Path(__file__).resolve().parents[1]
+        env = os.environ.copy()
+        env['GIT_OPTIONAL_LOCKS'] = '0'
+        git = shutil.which('git')
+        if not git:
+            raise CheckFailure('Git is required; install it before checking')
+        top = require([git, 'rev-parse', '--show-toplevel'], root, env, capture=True).strip()
+        if Path(top).resolve() != root:
+            raise CheckFailure('Run the check command from its repository checkout')
+        node = select_node(root, env)
+        print(f'Python: {sys.executable}; Node: {node}', flush=True)
+        with tempfile.TemporaryDirectory(prefix='pwnabase-check-') as directory:
+            temporary = Path(directory)
+            # Give every child the same Node, including tests launching it by name.
+            bin_path = temporary / 'bin'
+            bin_path.mkdir()
+            (bin_path / 'node').symlink_to(node)
+            child_env = env.copy()
+            child_env['PATH'] = str(bin_path) + os.pathsep + env.get('PATH', '')
+            child_env['RUN_REAL_TOOLS'] = '1' if args.real_tools else '0'
+            child_env['PYTHONPYCACHEPREFIX'] = str(temporary / 'bytecode')
+            child_env['PYTHONPATH'] = str(root)
+            # A Git hook exports repository-local variables. Fixture repositories
+            # in the tests must not inherit the real checkout's index or Git dir.
+            for name in require([git, 'rev-parse', '--local-env-vars'], root, env, capture=True).splitlines():
+                child_env.pop(name, None)
+            stage = 'whitespace'
+            print(f'Checking {stage}...', flush=True)
+            require([git, 'diff', '--check'], root, env)
+            require([git, 'diff', '--cached', '--check'], root, env)
+            stage = 'Python compilation'
+            print(f'Checking {stage}...', flush=True)
+            sources = [root / 'recover.py', *sorted((root / 'pwnabase').glob('*.py')),
+                       *sorted((root / 'tests').glob('*.py')), root / 'scripts/check']
+            require([sys.executable, '-m', 'py_compile', *map(str, sources)], root, child_env)
+            stage = 'Python tests'
+            print(f'Checking {stage}...', flush=True)
+            require([sys.executable, '-m', 'unittest', 'discover', '-s', 'tests', '-v'], root, child_env)
+            stage = 'frontend result-reader tests'
+            print(f'Checking {stage}...', flush=True)
+            require([str(node), 'frontend/tests/sheets.test.mjs'], root, child_env)
+        print(f'All checks passed ({time.monotonic() - started:.1f}s).', flush=True)
+        return 0
+    except Interrupted as exc:
+        print(f'Interrupted during {stage}; checks stopped.', file=sys.stderr)
+        return 128 + exc.signum
+    except (CheckFailure, OSError, ValueError, KeyError) as exc:
+        print(f'FAILED: {stage}: {exc}', file=sys.stderr)
+        return exc.code if isinstance(exc, CheckFailure) else 1
+
+
+if __name__ == '__main__':
+    signal.signal(signal.SIGINT, interrupt)
+    signal.signal(signal.SIGTERM, interrupt)
+    sys.exit(main())

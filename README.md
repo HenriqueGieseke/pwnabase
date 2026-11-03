@@ -108,6 +108,9 @@ console logs; it is a sequential local workflow, not a concurrent job scheduler.
 See [the architecture guide](docs/architecture.md) for module ownership,
 configuration/results, compatibility constraints and verification commands.
 
+Run `./scripts/check` for the required fast repository checks. See
+[the check guide](docs/checks.md) for dependencies and explicit real-tool testing.
+
 The agreed scope is recorded in [DESIGN.md](DESIGN.md), with domain terms in [GLOSSARY.md](GLOSSARY.md). Wardriving imports and a database are deferred.
 
 ## SSID-derived experiments
