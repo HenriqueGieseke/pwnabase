@@ -379,6 +379,40 @@ else:
         self.assertEqual(batches[0], batches[2])
         self.assertIn('Restarting incomplete attempt', result.stdout)
 
+    def test_light_profile_resumes_after_interrupt(self):
+        (self.captures / 'capture.pcap').write_text(tools.synthetic_record() + '\n')
+        self.words.write_bytes(b'unrelatedfixture\n' * 203 + b'testpass123\n')
+        output = self.root / 'out'
+        calls, marker, log = (self.root / name for name in ('calls', 'marker', 'batches'))
+        env = os.environ.copy()
+        env.update(PWNABASE_TEST_HASHCAT_CALLS=str(calls), PWNABASE_TEST_BLOCK_HASHCAT_CALL='3',
+                   PWNABASE_TEST_HASHCAT_MARKER=str(marker), PWNABASE_TEST_BATCH_LOG=str(log))
+        command = self.command(output) + ['--ssid-rules', 'light']
+        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                   text=True, env=env)
+        try:
+            deadline = time.monotonic() + 10
+            while not marker.exists() and process.poll() is None and time.monotonic() < deadline:
+                time.sleep(.02)
+            self.assertTrue(marker.exists())
+            process.send_signal(signal.SIGINT)
+            process.communicate(timeout=10)
+            self.assertEqual(process.returncode, 130)
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.communicate(timeout=10)
+            process.stdout.close()
+            process.stderr.close()
+        env.pop('PWNABASE_TEST_BLOCK_HASHCAT_CALL')
+        resumed = subprocess.run(command, capture_output=True, text=True, timeout=20, env=env)
+        self.assertEqual(resumed.returncode, 0, resumed.stdout + resumed.stderr)
+        self.assertIn('Resuming transformed wordlist', resumed.stdout)
+        batches = log.read_text().splitlines()
+        self.assertEqual(batches[1], batches[2])
+        result = json.loads(next((output / 'complete').glob('*.json')).read_text())
+        self.assertEqual(result['password'], 'testpass123')
+
     def test_exhaustion_filename_matches_pre_refactor_contract(self):
         (self.captures / 'capture.pcap').write_text(tools.synthetic_record() + '\n')
         # Preflight must still recover its fixed known password; target attempts

@@ -12,7 +12,7 @@ import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from pwnabase import cli
 from pwnabase.config import ROOT, RunConfig
-from pwnabase.candidates import WordlistCandidates, load_profile
+from pwnabase.candidates import WordlistCandidates, generate, load_profile, select_profile
 from test_recover import capture_bytes
 
 
@@ -23,6 +23,32 @@ class WordlistProfileTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.words = self.root / 'words.txt'
         self.info, self.config = load_profile(ROOT / 'rules/ssid.json')
+
+    def test_light_profile_is_bounded_deterministic_and_separate(self):
+        selected, info, config = select_profile(False, 'light', None, ROOT)
+        self.assertTrue(selected)
+        self.assertGreater(info['maximum_generated'], 500)
+        self.assertLessEqual(info['maximum_generated'], 1100)
+        self.assertNotEqual(info['sha256'], self.info['sha256'])
+        first, stats = generate('Minha Rede'.encode(), config)
+        second, again = generate('Minha Rede'.encode(), config)
+        self.assertEqual((first, stats), (second, again))
+        self.assertEqual(len(first), len(set(first)))
+        self.assertTrue(all(8 <= len(item) <= 63 for item in first))
+        self.assertIn(b'Minha Rede', first)
+        self.assertIn(b'minha rede1!', first)
+        self.assertEqual(generate(b'\xffabcdefg', config)[0], [b'\xffabcdefg'])
+        dashed, _ = generate(b'Home-Wifi', config)
+        self.assertEqual(dashed[:4], [b'Home-Wifi', b'Home-Wifi!', b'Home-Wifi@', b'Home-Wifi0'])
+        self.assertIn(b'home-wifi1', dashed)
+        catalog = json.loads((ROOT / 'rules/ssid-light.json').read_text())
+        catalog['rules'][-1]['values'].append('99')
+        altered = self.root / 'altered.json'
+        altered.write_text(json.dumps(catalog))
+        changed, _ = load_profile(altered)
+        self.assertNotEqual(info['sha256'], changed['sha256'])
+        _, bare, _ = select_profile(False, True, None, ROOT)
+        self.assertEqual(bare['sha256'], self.info['sha256'])
 
     def test_batch_cursor_resumes_at_source_word_boundary(self):
         self.words.write_bytes(b'firstseed\nsecondseed\n')

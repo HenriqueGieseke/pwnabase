@@ -121,6 +121,7 @@ To apply these same transformations to the **default SambaTu wordlist**, use:
 
 ```bash
 python3 recover.py --ssid-rules
+python3 recover.py --ssid-rules light
 ```
 
 For another wordlist, or an explicitly selected profile:
@@ -133,14 +134,18 @@ python3 recover.py --ssid-rules --rules rules/ssid.json --check
 
 `--ssid-rules` selects the default SSID profile but keeps wordlist entries as the
 seeds. Selecting an SSID-profile JSON with `--rules` also enables this behavior.
+The optional `light` profile uses a curated, fixed set of common variations and
+at most 973 combinations per word before deduplication. It is selected with
+`--ssid-rules light` and cannot be combined with `--rules`. The bare option
+continues to select the full profile.
 The profile's transformations are identical to SSID mode, but wordlist entries
 are not limited to 32 bytes. `--ssid-rules` cannot be combined with `--ssid` or
 `--preview-ssid`. Ordinary native catalogs such as `--rules rules/basic.json`
 continue to use Hashcat's native rules as before.
 
-Candidates stream to Hashcat's stdin in hex-encoded buffers of about 64 KB;
-the script holds at most one entry's generated candidate collection at a time.
-No expanded wordlist is saved to disk. LF/CRLF line endings are removed from the
+Candidates are generated into temporary hex-encoded batches for Hashcat; the
+script holds at most one entry's generated candidate collection at a time, and
+temporary batches are removed after use. LF/CRLF line endings are removed from the
 input entries; other bytes are preserved. Invalid UTF-8 entries contribute only
 their exact original bytes. Deduplication is **per entry**, so candidates shared
 by different source entries can still be tried multiple times. Generation counts

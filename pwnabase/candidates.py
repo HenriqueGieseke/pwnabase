@@ -52,7 +52,7 @@ def load_profile(path):
         return result
     accents = values('accents', {'preserve', 'strip'})
     cases = values('case', CASES)
-    separators = values('separators', {' ', '-', '.', '_', ''})
+    separators = values('separators', {' ', '-', '.', '_', '', 'preserve'})
     profiles = stages['substitutions'].get('profiles')
     if not isinstance(profiles, list) or not 1 <= len(profiles) <= 10:
         fail()
@@ -70,19 +70,28 @@ def load_profile(path):
             fail()
         maps.append(mapping)
     suffix = stages['suffixes']
-    for key in ('numbers', 'years'):
-        bounds = suffix.get(key)
-        if (not isinstance(bounds, dict) or set(bounds) != {'start', 'end'}
-                or any(type(bounds[k]) is not int for k in bounds)
-                or not 0 <= bounds['start'] <= bounds['end'] <= 9999):
+    if 'values' in suffix:
+        values = suffix['values']
+        if (not isinstance(values, list) or not values
+                or any(not isinstance(value, str) or not re.fullmatch(r'[0-9]{1,8}', value)
+                       for value in values) or len(values) != len(set(values))
+                or 'numbers' in suffix or 'years' in suffix):
             fail()
+        numbers = ['', *values]
+    else:
+        for key in ('numbers', 'years'):
+            bounds = suffix.get(key)
+            if (not isinstance(bounds, dict) or set(bounds) != {'start', 'end'}
+                    or any(type(bounds[k]) is not int for k in bounds)
+                    or not 0 <= bounds['start'] <= bounds['end'] <= 9999):
+                fail()
+        numbers = ['', *map(str, range(suffix['numbers']['start'], suffix['numbers']['end'] + 1)),
+                   *map(str, range(suffix['years']['start'], suffix['years']['end'] + 1))]
     punctuation = suffix.get('punctuation')
     if (not isinstance(punctuation, list) or not punctuation
             or any(not isinstance(value, str) or value not in {'', '!', '@', '#', '.'} for value in punctuation)
             or len(set(punctuation)) != len(punctuation)):
         fail()
-    numbers = ['', *map(str, range(suffix['numbers']['start'], suffix['numbers']['end'] + 1)),
-               *map(str, range(suffix['years']['start'], suffix['years']['end'] + 1))]
     maximum = 1 + len(accents) * len(cases) * len(separators) * len(maps) * len(numbers) * len(punctuation)
     if maximum > MAX_GENERATED:
         raise ValueError(f'SSID profile exceeds the {MAX_GENERATED:,} candidate-generation limit')
@@ -138,7 +147,8 @@ def generate(ssid, config):
         tokens = [token for token in re.split(r'[ ._\-]+', seed) if token]
         for mode in config['cases']:
             for separator in config['separators']:
-                base = case_variant(tokens, separator, mode)
+                base = (case_variant([seed], '', mode) if separator == 'preserve'
+                        else case_variant(tokens, separator, mode))
                 for mapping in config['substitutions']:
                     parts = []
                     for char in base:
@@ -315,11 +325,12 @@ def load_rules(path, work):
 
 def select_profile(ssid, ssid_rules, rules, root):
     selected = storage.read_json(rules.resolve()) if rules and not ssid else None
-    wordlist_profile = ssid_rules or bool(
+    wordlist_profile = bool(ssid_rules) or bool(
         isinstance(selected, dict) and selected.get('type') == 'ssid_profile')
     info, config = None, None
     if ssid or wordlist_profile:
-        info, config = load_profile((rules or root / 'rules' / 'ssid.json').resolve())
+        default_profile = 'ssid-light.json' if ssid_rules == 'light' else 'ssid.json'
+        info, config = load_profile((rules or root / 'rules' / default_profile).resolve())
     return wordlist_profile, info, config
 
 

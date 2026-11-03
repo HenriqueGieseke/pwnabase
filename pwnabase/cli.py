@@ -20,7 +20,8 @@ def main(argv=None):
     parser.add_argument('--output', type=Path, default=ROOT,
                         help='Parent directory for outcome directories and private runtime state')
     parser.add_argument('--rules', type=Path, help='JSON mutation catalog (opt-in)')
-    parser.add_argument('--ssid-rules', action='store_true', help='Apply the SSID profile to external wordlist entries (default: SambaTu)')
+    parser.add_argument('--ssid-rules', nargs='?', const='full', default=False, choices=['full', 'light'],
+                        help='Apply the full (default) or light profile to wordlist entries')
     parser.add_argument('--retry-unusable', action='store_true')
     parser.add_argument('--restart-incomplete', action='store_true',
                         help='Back up matching incomplete transformed-wordlist checkpoints and restart them')

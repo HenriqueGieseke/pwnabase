@@ -13,7 +13,7 @@ class RunConfig:
     output: Path = ROOT
     rules: Path | None = None
     ssid: bool = False
-    ssid_rules: bool = False
+    ssid_rules: bool | str = False
     preview_ssid: str | None = None
     preview_limit: int = 50
     retry_unusable: bool = False
@@ -34,6 +34,10 @@ class RunConfig:
             raise ValueError('--preview-ssid and --check cannot be combined')
         if ssid and self.ssid_rules:
             raise ValueError('--ssid-rules is a wordlist option; do not combine it with --ssid or --preview-ssid')
+        if self.ssid_rules not in (False, True, 'full', 'light'):
+            raise ValueError('Unsupported transformed-wordlist profile')
+        if self.ssid_rules == 'light' and self.rules is not None:
+            raise ValueError('--ssid-rules light cannot be combined with --rules')
         if ssid and self.wordlist is not None:
             raise ValueError('--wordlist cannot be combined with --ssid or --preview-ssid')
         if self.device_types not in {'1', '2', '1,2'}:

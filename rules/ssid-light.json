@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "type": "ssid_profile",
+  "id": "wordlist-light",
+  "description": "Bounded common transformations for external wordlists",
+  "rules": [
+    {"id": "accents", "description": "Preserve or strip accents", "operation": "accents", "values": ["preserve", "strip"]},
+    {"id": "case", "description": "Original, lowercase, and initial capitals", "operation": "case", "values": ["original", "lower", "title"]},
+    {"id": "separators", "description": "Preserve existing separators", "operation": "separators", "values": ["preserve"]},
+    {"id": "substitutions", "description": "Unchanged and common numeric substitutions", "operation": "substitutions", "profiles": [
+      {"id": "unchanged", "description": "No substitutions", "replacements": {}},
+      {"id": "numeric", "description": "Common numeric lookalikes", "replacements": {"a": "4", "e": "3", "i": "1", "o": "0"}}
+    ]},
+    {"id": "suffixes", "description": "Curated numbers and fixed years with optional punctuation", "operation": "suffixes", "values": ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "11", "12", "21", "22", "23", "123", "1234", "12345", "111", "000", "2020", "2021", "2022", "2023", "2024", "2025"], "punctuation": ["", "!", "@"]}
+  ]
+}
