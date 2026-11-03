@@ -3,7 +3,6 @@
 
 import argparse
 from collections import Counter
-from datetime import datetime, timezone
 import fcntl
 import hashlib
 import hmac
@@ -17,7 +16,7 @@ import subprocess
 import sys
 import tempfile
 
-from pwnabase import tools
+from pwnabase import storage, tools
 from pwnabase.tools import ToolError
 
 from ssid_candidates import (load_profile, generate as generate_ssid,
@@ -26,32 +25,6 @@ from ssid_candidates import (load_profile, generate as generate_ssid,
 
 ROOT = Path(__file__).resolve().parent
 EXTENSIONS = {'.pcap', '.pcapng', '.cap'}
-
-
-def fingerprint(path):
-    digest = hashlib.sha256()
-    with path.open('rb') as stream:
-        for block in iter(lambda: stream.read(1024 * 1024), b''):
-            digest.update(block)
-    return digest.hexdigest()
-
-
-def atomic_json(path, value):
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    fd, name = tempfile.mkstemp(prefix='.pending-', dir=path.parent)
-    try:
-        with os.fdopen(fd, 'w', encoding='utf-8') as stream:
-            json.dump(value, stream, ensure_ascii=True, indent=2)
-            stream.write('\n')
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(name, path)
-    finally:
-        Path(name).unlink(missing_ok=True)
-
-
-def read_json(path):
-    return json.loads(path.read_text(encoding='utf-8')) if path.exists() else None
 
 
 def parse_record(line):
@@ -88,7 +61,7 @@ def synthetic_record(password=b'testpass123', ssid=b'pwnabase-self-test'):
 
 
 def load_rules(path, work):
-    catalog = read_json(path)
+    catalog = storage.read_json(path)
     if not isinstance(catalog, dict) or type(catalog.get('schema_version')) is not int or catalog['schema_version'] != 1:
         raise ToolError('Rule catalog must have schema_version 1')
     def identifier(value):
@@ -200,31 +173,19 @@ def preflight(args, env, work):
     print('Dependencies and mode 22000 recovery verified.', flush=True)
 
 
-def add_source(result, source):
-    sources = result.setdefault('sources', [])
-    if source not in sources:
-        sources.append(source)
-
-
-def result_base(status, source, wordlist, rules=None):
-    return {'schema_version': 1, 'status': status,
-            'updated_at': datetime.now(timezone.utc).isoformat(),
-            'sources': [source], 'wordlist': wordlist, 'rules': rules}
-
-
 def process_capture(path, args, env, work, wordlist, wordinfo, counts):
     # Work on a byte-for-byte snapshot; never modify or clean original packets.
     snapshot = work / ('capture' + path.suffix.lower())
     shutil.copyfile(path, snapshot)
-    capture_id = fingerprint(snapshot)
+    capture_id = storage.fingerprint(snapshot)
     source = {'path': str(path), 'sha256': capture_id}
-    no_usable = args.output / 'no-usable-handshake' / f'{capture_id}.json'
-    state = args.output / '.pwnabase' / 'captures' / f'{capture_id}.json'
-    previous = read_json(no_usable)
+    store = storage.ResultStore(args.output)
+    no_usable = store.path('no-usable-handshake', capture_id)
+    previous = storage.read_json(no_usable)
     if previous and not args.retry_unusable:
         print('  Skipped: unchanged capture previously yielded no usable handshake.', flush=True)
-        add_source(previous, source)
-        atomic_json(no_usable, previous)
+        storage.add_source(previous, source)
+        storage.atomic_json(no_usable, previous)
         counts['skipped_unusable'] += 1
         return
     print('  Extracting authentication records...', flush=True)
@@ -241,20 +202,17 @@ def process_capture(path, args, env, work, wordlist, wordinfo, counts):
                for record in [parse_record(line.strip())]}
     args.records_seen = getattr(args, 'records_seen', 0) + len(records)
     print(f'  Extracted {len(records)} records: ' + str(dict(Counter(r["kind"] for r in records.values()))), flush=True)
-    provenance = read_json(state) or {'schema_version': 1, 'sources': []}
-    add_source(provenance, source)
-    provenance['records'] = list(records.values())
-    atomic_json(state, provenance)
+    provenance = store.provenance(capture_id, source, records)
     if not records:
-        result = result_base('no_usable_handshake', source, None)
+        result = storage.result_base('no_usable_handshake', source, None)
         result['sources'] = provenance['sources']
-        atomic_json(no_usable, result)
+        storage.atomic_json(no_usable, result)
         print(f'  No usable handshake; saved {no_usable}', flush=True)
         counts['no_usable_handshake'] += 1
         return
-    no_usable.unlink(missing_ok=True)
+    store.clear(no_usable)
     for record_id, record in records.items():
-        success = args.output / 'complete' / f'{record_id}.json'
+        success = store.path('complete', record_id)
         rules_info = getattr(args, 'rules_info', None)
         ssid_mode = getattr(args, 'ssid', False)
         wordlist_profile = getattr(args, 'wordlist_profile', False)
@@ -264,21 +222,18 @@ def process_capture(path, args, env, work, wordlist, wordinfo, counts):
         attempt_key = (('ssid-' if ssid_mode else WORDLIST_GENERATOR + '-' if wordlist_profile else '') + candidate_source['sha256']
                        + ('-' + rules_info['sha256'] if rules_info else ''))
         label = 'ssid' if ssid_mode else wordinfo['label']
-        exhausted = args.output / 'exhausted' / label / f'{record_id}-{attempt_key}.json'
-        error = args.output / 'tool-error' / f'record-{record_id}.json'
+        exhausted = store.path('exhausted', f'{record_id}-{attempt_key}', label)
+        error = store.path('tool-error', f'record-{record_id}')
         generation = None
         try:
             # Content identity survives renaming a wordlist or its parent folder.
-            matches = sorted((args.output / 'exhausted').glob(
-                f'*/{record_id}-{attempt_key}.json'))
-            previous_path = success if success.exists() else (matches[0] if matches else exhausted)
-            previous = read_json(previous_path)
+            previous_path, previous = store.previous_attempt(record_id, attempt_key, label)
             if previous:
                 print(f'  Skipped {record_id[:12]}: {previous["status"]} (matching saved result).', flush=True)
                 for item in provenance['sources']:
-                    add_source(previous, item)
-                atomic_json(previous_path, previous)
-                error.unlink(missing_ok=True)
+                    storage.add_source(previous, item)
+                storage.atomic_json(previous_path, previous)
+                store.clear(error)
                 counts['skipped_' + previous['status']] += 1
                 continue
             print(f'  Attempting {record_id[:12]}: SSID={json.dumps(record["ssid"])} BSSID={record["bssid"]}', flush=True)
@@ -308,7 +263,7 @@ def process_capture(path, args, env, work, wordlist, wordinfo, counts):
             else:
                 password = recover(record, wordlist, args, env, work)
                 status = 'recovered' if password is not None else 'wordlist_exhausted'
-            result = result_base(status, source, wordinfo, rules_info)
+            result = storage.result_base(status, source, wordinfo, rules_info)
             result['candidate_source'] = candidate_source
             if generation is not None:
                 result['candidate_generation'] = generation
@@ -320,17 +275,17 @@ def process_capture(path, args, env, work, wordlist, wordinfo, counts):
                     result['password'] = password.decode('utf-8')
                 except UnicodeDecodeError:
                     result['password'] = None
-            atomic_json(success if password is not None else exhausted, result)
-            error.unlink(missing_ok=True)
+            storage.atomic_json(success if password is not None else exhausted, result)
+            store.clear(error)
             print(f'  {status}: {time.monotonic() - attempt_started:.1f}s; saved {success if password is not None else exhausted}', flush=True)
             counts[status] += 1
         except (OSError, ValueError, ToolError) as exc:
-            result = result_base('tool_error', source, wordinfo, getattr(args, 'rules_info', None))
+            result = storage.result_base('tool_error', source, wordinfo, getattr(args, 'rules_info', None))
             result['candidate_source'] = candidate_source
             if generation is not None:
                 result['candidate_generation'] = generation
             result.update(record=record, error=str(exc))
-            atomic_json(error, result)
+            storage.atomic_json(error, result)
             counts['tool_error'] += 1
             print(f'  Record {record_id[:12]}: {exc}; continuing with remaining inputs.', file=sys.stderr, flush=True)
 
@@ -372,7 +327,7 @@ def main(argv=None):
     args.handshakes = args.handshakes.resolve()
     counts = Counter()
     try:
-        selected_catalog = read_json(args.rules.resolve()) if args.rules and not args.ssid else None
+        selected_catalog = storage.read_json(args.rules.resolve()) if args.rules and not args.ssid else None
         args.wordlist_profile = args.ssid_rules or bool(
             isinstance(selected_catalog, dict) and selected_catalog.get('type') == 'ssid_profile')
         if args.ssid or args.wordlist_profile:
@@ -432,9 +387,9 @@ def main(argv=None):
                     if not wordlist.stat().st_size:
                         raise ToolError('Wordlist is empty')
                     label = re.sub(r'[^A-Za-z0-9._-]', '_', args.wordlist.stem).strip('.') or 'wordlist'
-                    wordinfo = {'path': str(args.wordlist), 'label': label, 'sha256': fingerprint(wordlist)}
-                for folder in ['complete', f'exhausted/{label}', 'no-usable-handshake', 'tool-error']:
-                    (args.output / folder).mkdir(parents=True, exist_ok=True, mode=0o700)
+                    wordinfo = {'path': str(args.wordlist), 'label': label, 'sha256': storage.fingerprint(wordlist)}
+                store = storage.ResultStore(args.output)
+                store.prepare(label)
                 captures = sorted(p for p in args.handshakes.iterdir()
                                   if p.is_file() and p.suffix.lower() in EXTENSIONS)
                 print(f'Found {len(captures)} captures; source: {"each record’s SSID" if args.ssid else args.wordlist.name}.', flush=True)
@@ -447,18 +402,18 @@ def main(argv=None):
                         error_id = hashlib.sha256(str(path).encode()).hexdigest()
                         source = {'path': str(path)}
                         try:
-                            source['sha256'] = fingerprint(path)
+                            source['sha256'] = storage.fingerprint(path)
                         except OSError:
                             pass
-                        result = result_base('tool_error', source, wordinfo, getattr(args, 'rules_info', None))
+                        result = storage.result_base('tool_error', source, wordinfo, getattr(args, 'rules_info', None))
                         result['candidate_source'] = dict(type='ssid', label='SSID') if args.ssid else dict(type='wordlist', **(wordinfo or {}))
                         result['error'] = str(exc)
-                        atomic_json(args.output / 'tool-error' / f'path-{error_id}.json', result)
+                        storage.atomic_json(store.path('tool-error', f'path-{error_id}'), result)
                         counts['tool_error'] += 1
                         print(f'  Capture error: {exc}; continuing with remaining inputs.', file=sys.stderr, flush=True)
                     else:
                         error_id = hashlib.sha256(str(path).encode()).hexdigest()
-                        (args.output / 'tool-error' / f'path-{error_id}.json').unlink(missing_ok=True)
+                        store.clear(store.path('tool-error', f'path-{error_id}'))
                 print(f'Batch elapsed: {time.monotonic() - batch_started:.1f}s; captures visited: {len(captures)}', flush=True)
                 print(f'Authentication records encountered: {getattr(args, "records_seen", 0)} (including duplicates across captures).', flush=True)
                 for label, key in [('Recovered records', 'recovered'), ('Exhausted wordlist records', 'wordlist_exhausted'), ('Exhausted SSID records', 'candidates_exhausted'), ('No eligible candidates', 'no_eligible_candidates'), ('Unusable captures', 'no_usable_handshake'), ('Skipped recovered records', 'skipped_recovered'), ('Skipped exhausted wordlist records', 'skipped_wordlist_exhausted'), ('Skipped exhausted SSID records', 'skipped_candidates_exhausted'), ('Skipped no-eligible-candidate records', 'skipped_no_eligible_candidates'), ('Skipped unusable captures', 'skipped_unusable'), ('Capture or record errors', 'tool_error')]:

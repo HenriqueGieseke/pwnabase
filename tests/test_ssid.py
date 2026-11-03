@@ -13,6 +13,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import recover
+from pwnabase import storage
 from pwnabase import tools
 import ssid_candidates as ssid
 from test_recover import capture_bytes
@@ -112,7 +113,7 @@ class SSIDTests(unittest.TestCase):
         # Same wordlist exhaustion cannot suppress an SSID experiment.
         record = recover.parse_record(recover.synthetic_record(ssid=b'Minha Rede'))
         old = self.root / 'exhausted' / 'ssid' / f'{record["record_id"]}-unrelated.json'
-        recover.atomic_json(old, {'status': 'wordlist_exhausted'})
+        storage.atomic_json(old, {'status': 'wordlist_exhausted'})
         with patch.object(recover, 'recover', return_value=None) as crack:
             self.assertEqual(self.process(b'Minha Rede'), {'candidates_exhausted': 1})
             self.assertEqual(self.process(b'Minha Rede'), {'skipped_candidates_exhausted': 1})

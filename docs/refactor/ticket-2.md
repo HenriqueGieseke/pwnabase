@@ -1,6 +1,6 @@
 # Ticket 2: safe tool execution
 
-Implementation is ready for owner review; it is not committed or pushed.
+Completed and pushed in commit d7a48d4 after owner approval.
 
 ## Change
 

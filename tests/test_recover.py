@@ -15,6 +15,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import recover
+from pwnabase import storage
 from pwnabase import tools
 
 
@@ -73,7 +74,7 @@ class BatchTests(unittest.TestCase):
         self.words = self.root / 'words.txt'
         self.words.write_bytes(b'testpass123\n')
         self.args = argparse.Namespace(output=self.root, retry_unusable=False, extractor='extractor')
-        self.info = {'label': 'words', 'sha256': recover.fingerprint(self.words), 'path': str(self.words)}
+        self.info = {'label': 'words', 'sha256': storage.fingerprint(self.words), 'path': str(self.words)}
         self.good = recover.synthetic_record()
         self.other = recover.synthetic_record(b'different123', b'another-network')
 
@@ -88,15 +89,15 @@ class BatchTests(unittest.TestCase):
         return counts
 
     def test_mixed_outcomes_skip_and_changed_wordlist(self):
-        before = recover.fingerprint(self.capture)
+        before = storage.fingerprint(self.capture)
         with patch.object(tools, 'run_tool', side_effect=self.extract), patch.object(
                 recover, 'recover', side_effect=[b'testpass123', None]) as crack:
             self.assertEqual(self.process(), {'recovered': 1, 'wordlist_exhausted': 1})
             self.assertEqual(crack.call_count, 2)
-        self.assertEqual(recover.fingerprint(self.capture), before)
+        self.assertEqual(storage.fingerprint(self.capture), before)
         successes = list((self.root / 'complete').glob('*.json'))
         self.assertEqual(len(successes), 1)
-        self.assertEqual(recover.read_json(successes[0])['password'], 'testpass123')
+        self.assertEqual(storage.read_json(successes[0])['password'], 'testpass123')
         self.assertEqual(successes[0].stat().st_mode & 0o777, 0o600)
         with patch.object(tools, 'run_tool', side_effect=self.extract), patch.object(recover, 'recover') as crack:
             self.assertEqual(self.process(), {'skipped_recovered': 1, 'skipped_wordlist_exhausted': 1})
@@ -105,7 +106,7 @@ class BatchTests(unittest.TestCase):
             self.assertEqual(self.process()['skipped_wordlist_exhausted'], 1)
             crack.assert_not_called()
         self.words.write_bytes(b'changedpass\n')
-        self.info['sha256'] = recover.fingerprint(self.words)
+        self.info['sha256'] = storage.fingerprint(self.words)
         with patch.object(tools, 'run_tool', side_effect=self.extract), patch.object(
                 recover, 'recover', return_value=b'different123') as crack:
             self.assertEqual(self.process(), {'skipped_recovered': 1, 'recovered': 1})
@@ -142,15 +143,15 @@ class BatchTests(unittest.TestCase):
             self.capture = duplicate
             self.process()
         for path in (self.root / 'complete').glob('*.json'):
-            self.assertEqual(len(recover.read_json(path)['sources']), 2)
+            self.assertEqual(len(storage.read_json(path)['sources']), 2)
 
     def test_failed_atomic_write_preserves_previous_result(self):
         path = self.root / 'result.json'
-        recover.atomic_json(path, {'status': 'old'})
-        with patch.object(recover.os, 'replace', side_effect=OSError('fixture disk error')):
+        storage.atomic_json(path, {'status': 'old'})
+        with patch.object(storage.os, 'replace', side_effect=OSError('fixture disk error')):
             with self.assertRaises(OSError):
-                recover.atomic_json(path, {'status': 'new'})
-        self.assertEqual(recover.read_json(path), {'status': 'old'})
+                storage.atomic_json(path, {'status': 'new'})
+        self.assertEqual(storage.read_json(path), {'status': 'old'})
         self.assertEqual(list(self.root.glob('.pending-*')), [])
 
     def test_rule_identity_and_exhaustion_are_independent(self):
@@ -158,9 +159,9 @@ class BatchTests(unittest.TestCase):
         catalog.write_text((recover.ROOT / 'rules/basic.json').read_text())
         native, info = recover.load_rules(catalog, self.work)
         self.assertEqual(len(native.read_text().splitlines()), 8)
-        data = recover.read_json(catalog)
+        data = storage.read_json(catalog)
         data['description'] = 'Changed explanation'
-        recover.atomic_json(catalog, data)
+        storage.atomic_json(catalog, data)
         self.assertEqual(recover.load_rules(catalog, self.work)[1]['sha256'], info['sha256'])
         with patch.object(tools, 'run_tool', side_effect=self.extract), patch.object(recover, 'recover', return_value=None):
             self.process()
@@ -168,12 +169,12 @@ class BatchTests(unittest.TestCase):
             self.assertEqual(self.process(), {'wordlist_exhausted': 2})
             self.assertEqual(self.process(), {'skipped_wordlist_exhausted': 2})
             data['rules'][0]['expression'] = 'c'
-            recover.atomic_json(catalog, data)
+            storage.atomic_json(catalog, data)
             self.args.rules_info = recover.load_rules(catalog, self.work)[1]
             self.assertNotEqual(self.args.rules_info['sha256'], info['sha256'])
             self.assertEqual(self.process(), {'wordlist_exhausted': 2})
         data['rules'][0]['expression'] = 'c\n$!'
-        recover.atomic_json(catalog, data)
+        storage.atomic_json(catalog, data)
         with self.assertRaises(recover.ToolError):
             recover.load_rules(catalog, self.work)
 
@@ -207,7 +208,7 @@ class RealToolsTests(unittest.TestCase):
                 (b'fixture-eapol', b'correctpass123')], eapol=True))
             words = root / 'tiny.txt'
             words.write_bytes(b'wrongpass123\ncorrectpass123\n')
-            before = {p.name: recover.fingerprint(p) for p in captures.iterdir()}
+            before = {p.name: storage.fingerprint(p) for p in captures.iterdir()}
             command = [sys.executable, str(recover.ROOT / 'recover.py'), '--handshakes', str(captures),
                        '--wordlist', str(words), '--output', str(root / 'out'), '--device-types', '1']
             result = subprocess.run(command, capture_output=True, text=True, timeout=300)
@@ -215,13 +216,13 @@ class RealToolsTests(unittest.TestCase):
             output = root / 'out'
             successes = list((output / 'complete').glob('*.json'))
             self.assertEqual(len(successes), 2, result.stdout + result.stderr)
-            self.assertEqual({recover.read_json(p)['record']['kind'] for p in successes}, {'eapol', 'pmkid'})
+            self.assertEqual({storage.read_json(p)['record']['kind'] for p in successes}, {'eapol', 'pmkid'})
             self.assertEqual(len(list((output / 'exhausted/tiny').glob('*.json'))), 1)
             self.assertEqual(len(list((output / 'no-usable-handshake').glob('*.json'))), 1)
             self.assertEqual(len(list((output / 'tool-error').glob('*.json'))), 1)
             for path in successes:
-                self.assertEqual(recover.read_json(path)['password'], 'correctpass123')
-            self.assertEqual(before, {p.name: recover.fingerprint(p) for p in captures.iterdir()})
+                self.assertEqual(storage.read_json(path)['password'], 'correctpass123')
+            self.assertEqual(before, {p.name: storage.fingerprint(p) for p in captures.iterdir()})
             self.assertNotIn('correctpass123', result.stdout + result.stderr)
             again = subprocess.run(command, capture_output=True, text=True, timeout=300)
             self.assertEqual(again.returncode, 1, again.stdout + again.stderr)
@@ -233,7 +234,7 @@ class RealToolsTests(unittest.TestCase):
             self.assertEqual(mutated.returncode, 1, mutated.stdout + mutated.stderr)
             successes = list((output / 'complete').glob('*.json'))
             self.assertEqual(len(successes), 3, mutated.stdout + mutated.stderr)
-            found = [recover.read_json(p) for p in successes if recover.read_json(p)['password'] == 'Correctpass123!']
+            found = [storage.read_json(p) for p in successes if storage.read_json(p)['password'] == 'Correctpass123!']
             self.assertEqual(len(found), 1)
             self.assertEqual(found[0]['rules']['id'], 'basic')
             self.assertEqual(len(list((output / 'exhausted/tiny').glob('*.json'))), 1)
