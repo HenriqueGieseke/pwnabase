@@ -16,11 +16,10 @@ import subprocess
 import sys
 import tempfile
 
-from pwnabase import storage, tools
+from pwnabase import candidates, storage, tools
 from pwnabase.tools import ToolError
 
-from ssid_candidates import (load_profile, generate as generate_ssid,
-                             source_info as ssid_source, WordlistCandidates, WORDLIST_GENERATOR)
+
 
 
 ROOT = Path(__file__).resolve().parent
@@ -58,34 +57,6 @@ def synthetic_record(password=b'testpass123', ssid=b'pwnabase-self-test'):
     pmk = hashlib.pbkdf2_hmac('sha1', password, ssid, 4096, 32)
     pmkid = hmac.new(pmk, b'PMK Name' + ap + client, hashlib.sha1).digest()[:16]
     return f'WPA*01*{pmkid.hex()}*{ap.hex()}*{client.hex()}*{ssid.hex()}***'
-
-
-def load_rules(path, work):
-    catalog = storage.read_json(path)
-    if not isinstance(catalog, dict) or type(catalog.get('schema_version')) is not int or catalog['schema_version'] != 1:
-        raise ToolError('Rule catalog must have schema_version 1')
-    def identifier(value):
-        return isinstance(value, str) and re.fullmatch(r'[A-Za-z0-9_-]+', value)
-    if not identifier(catalog.get('id')) or not isinstance(catalog.get('description'), str):
-        raise ToolError('Rule catalog needs an ID and description')
-    rules = catalog.get('rules')
-    if not isinstance(rules, list) or not rules:
-        raise ToolError('Rule catalog must contain a nonempty rules array')
-    seen, expressions = set(), []
-    for rule in rules:
-        if not isinstance(rule, dict) or not identifier(rule.get('id')) or rule['id'] in seen:
-            raise ToolError('Each rule needs a unique ID')
-        expression = rule.get('expression')
-        if (not isinstance(rule.get('description'), str) or not isinstance(expression, str)
-                or not expression or expression.startswith('#')
-                or any(ord(char) < 32 or ord(char) > 126 for char in expression)):
-            raise ToolError(f'Rule {rule["id"]} needs a description and a single printable ASCII expression')
-        seen.add(rule['id'])
-        expressions.append(expression)
-    digest = hashlib.sha256(json.dumps(expressions, separators=(',', ':')).encode('ascii')).hexdigest()
-    native = work / 'selected.rule'
-    native.write_text('\n'.join(expressions) + '\n', encoding='ascii')
-    return native, dict(catalog, path=str(path), sha256=digest)
 
 
 def validate_rules(args, env, work):
@@ -216,12 +187,8 @@ def process_capture(path, args, env, work, wordlist, wordinfo, counts):
         rules_info = getattr(args, 'rules_info', None)
         ssid_mode = getattr(args, 'ssid', False)
         wordlist_profile = getattr(args, 'wordlist_profile', False)
-        candidate_source = ssid_source(bytes.fromhex(record['ssid_hex'])) if ssid_mode else dict(type='wordlist', **wordinfo)
-        if wordlist_profile:
-            candidate_source.update(transformation='ssid_profile', generator=WORDLIST_GENERATOR)
-        attempt_key = (('ssid-' if ssid_mode else WORDLIST_GENERATOR + '-' if wordlist_profile else '') + candidate_source['sha256']
-                       + ('-' + rules_info['sha256'] if rules_info else ''))
-        label = 'ssid' if ssid_mode else wordinfo['label']
+        candidate_source, attempt_key, label = candidates.attempt_identity(
+            record, wordinfo, rules_info, ssid_mode, wordlist_profile)
         exhausted = store.path('exhausted', f'{record_id}-{attempt_key}', label)
         error = store.path('tool-error', f'record-{record_id}')
         generation = None
@@ -239,19 +206,19 @@ def process_capture(path, args, env, work, wordlist, wordinfo, counts):
             print(f'  Attempting {record_id[:12]}: SSID={json.dumps(record["ssid"])} BSSID={record["bssid"]}', flush=True)
             attempt_started = time.monotonic()
             if ssid_mode:
-                candidates, generation = generate_ssid(bytes.fromhex(record['ssid_hex']), args.ssid_config)
+                generated, generation = candidates.generate(bytes.fromhex(record['ssid_hex']), args.ssid_config)
                 print('  SSID candidate counts: ' + json.dumps(generation, sort_keys=True), flush=True)
                 if not generation['valid_utf8']:
                     print('  SSID is not valid UTF-8; testing exact bytes only, without text transformations.', flush=True)
                 candidate_file = work / 'ssid-candidates.hex'
                 with candidate_file.open('w', encoding='ascii') as stream:
-                    for candidate in candidates:
+                    for candidate in generated:
                         stream.write(candidate.hex() + '\n')
-                password = recover(record, candidate_file, args, env, work, use_rules=False, hex_wordlist=True) if candidates else None
+                password = recover(record, candidate_file, args, env, work, use_rules=False, hex_wordlist=True) if generated else None
                 status = ('recovered' if password is not None else
-                          'candidates_exhausted' if candidates else 'no_eligible_candidates')
+                          'candidates_exhausted' if generated else 'no_eligible_candidates')
             elif wordlist_profile:
-                stream = WordlistCandidates(wordlist, args.ssid_config)
+                stream = candidates.WordlistCandidates(wordlist, args.ssid_config)
                 try:
                     password = recover(record, None, args, env, work, use_rules=False,
                                        hex_wordlist=True, candidate_stream=stream)
@@ -327,21 +294,10 @@ def main(argv=None):
     args.handshakes = args.handshakes.resolve()
     counts = Counter()
     try:
-        selected_catalog = storage.read_json(args.rules.resolve()) if args.rules and not args.ssid else None
-        args.wordlist_profile = args.ssid_rules or bool(
-            isinstance(selected_catalog, dict) and selected_catalog.get('type') == 'ssid_profile')
-        if args.ssid or args.wordlist_profile:
-            args.rules_info, args.ssid_config = load_profile((args.rules or ROOT / 'rules' / 'ssid.json').resolve())
+        args.wordlist_profile, args.rules_info, args.ssid_config = candidates.select_profile(
+            args.ssid, args.ssid_rules, args.rules, ROOT)
         if args.preview_ssid is not None:
-            seed = args.preview_ssid.encode('utf-8')
-            if not 1 <= len(seed) <= 32:
-                raise ToolError('Preview SSID must contain 1–32 UTF-8 bytes')
-            candidates, stats = generate_ssid(seed, args.ssid_config)
-            print('SSID preview counts: ' + json.dumps(stats, sort_keys=True))
-            limit = min(len(candidates), args.preview_limit)
-            print(f'Sample of {limit} eligible candidates out of {len(candidates)} (no captures read, no recovery):')
-            for index in range(limit):
-                print(json.dumps(candidates[index * len(candidates) // limit].decode('utf-8'), ensure_ascii=False))
+            candidates.preview(args.preview_ssid, args.ssid_config, args.preview_limit)
             return 0
         runtime = args.output / '.pwnabase'
         runtime.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -366,7 +322,7 @@ def main(argv=None):
                 if not args.ssid and not args.wordlist_profile:
                     args.rules_info = None
                 if args.rules and not args.ssid and not args.wordlist_profile:
-                    args.native_rules, args.rules_info = load_rules(args.rules.resolve(), work)
+                    args.native_rules, args.rules_info = candidates.load_rules(args.rules.resolve(), work)
                 preflight(args, env, work)
                 if args.ssid or args.wordlist_profile:
                     print(f'Generation profile: {args.rules_info["id"]}; fingerprint {args.rules_info["sha256"][:12]}; candidate generation limit 1,000,000 per seed.', flush=True)
@@ -382,12 +338,8 @@ def main(argv=None):
                     raise ToolError(f'Capture directory does not exist: {args.handshakes}')
                 wordlist, wordinfo, label = None, None, 'ssid'
                 if not args.ssid:
-                    wordlist = work / 'wordlist.txt'
-                    shutil.copyfile(args.wordlist, wordlist)
-                    if not wordlist.stat().st_size:
-                        raise ToolError('Wordlist is empty')
-                    label = re.sub(r'[^A-Za-z0-9._-]', '_', args.wordlist.stem).strip('.') or 'wordlist'
-                    wordinfo = {'path': str(args.wordlist), 'label': label, 'sha256': storage.fingerprint(wordlist)}
+                    wordlist, wordinfo = candidates.snapshot_wordlist(args.wordlist, work)
+                    label = wordinfo['label']
                 store = storage.ResultStore(args.output)
                 store.prepare(label)
                 captures = sorted(p for p in args.handshakes.iterdir()

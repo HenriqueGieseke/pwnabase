@@ -15,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import recover
 from pwnabase import storage
 from pwnabase import tools
-import ssid_candidates as ssid
+from pwnabase import candidates as ssid
 from test_recover import capture_bytes
 
 

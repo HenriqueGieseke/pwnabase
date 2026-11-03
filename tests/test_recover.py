@@ -15,7 +15,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import recover
-from pwnabase import storage
+from pwnabase import candidates, storage
 from pwnabase import tools
 
 
@@ -157,12 +157,12 @@ class BatchTests(unittest.TestCase):
     def test_rule_identity_and_exhaustion_are_independent(self):
         catalog = self.root / 'rules.json'
         catalog.write_text((recover.ROOT / 'rules/basic.json').read_text())
-        native, info = recover.load_rules(catalog, self.work)
+        native, info = candidates.load_rules(catalog, self.work)
         self.assertEqual(len(native.read_text().splitlines()), 8)
         data = storage.read_json(catalog)
         data['description'] = 'Changed explanation'
         storage.atomic_json(catalog, data)
-        self.assertEqual(recover.load_rules(catalog, self.work)[1]['sha256'], info['sha256'])
+        self.assertEqual(candidates.load_rules(catalog, self.work)[1]['sha256'], info['sha256'])
         with patch.object(tools, 'run_tool', side_effect=self.extract), patch.object(recover, 'recover', return_value=None):
             self.process()
             self.args.rules_info = info
@@ -170,13 +170,13 @@ class BatchTests(unittest.TestCase):
             self.assertEqual(self.process(), {'skipped_wordlist_exhausted': 2})
             data['rules'][0]['expression'] = 'c'
             storage.atomic_json(catalog, data)
-            self.args.rules_info = recover.load_rules(catalog, self.work)[1]
+            self.args.rules_info = candidates.load_rules(catalog, self.work)[1]
             self.assertNotEqual(self.args.rules_info['sha256'], info['sha256'])
             self.assertEqual(self.process(), {'wordlist_exhausted': 2})
         data['rules'][0]['expression'] = 'c\n$!'
         storage.atomic_json(catalog, data)
         with self.assertRaises(recover.ToolError):
-            recover.load_rules(catalog, self.work)
+            candidates.load_rules(catalog, self.work)
 
     def test_capture_failure_continues_batch(self):
         captures = self.root / 'captures'

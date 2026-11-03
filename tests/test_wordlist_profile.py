@@ -13,7 +13,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import recover
-from ssid_candidates import WordlistCandidates, load_profile
+from pwnabase.candidates import WordlistCandidates, load_profile
 from test_recover import capture_bytes
 
 

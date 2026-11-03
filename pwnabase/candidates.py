@@ -1,8 +1,12 @@
-"""Deterministic, byte-safe SSID candidate generation; no tool or filesystem writes."""
+"""Candidate sources, profiles, native rules and byte-safe generation."""
 
 import hashlib
 import json
 import re
+import shutil
+
+from . import storage
+from .tools import ToolError
 import unicodedata
 
 WORDLIST_GENERATOR = 'wordlist-profile-v1'
@@ -189,3 +193,71 @@ class WordlistCandidates:
             yield bytes(buffer)
         if not stop.is_set():
             self.stats['source_complete'] = True
+
+
+def load_rules(path, work):
+    catalog = storage.read_json(path)
+    if not isinstance(catalog, dict) or type(catalog.get('schema_version')) is not int or catalog['schema_version'] != 1:
+        raise ToolError('Rule catalog must have schema_version 1')
+    def identifier(value):
+        return isinstance(value, str) and re.fullmatch(r'[A-Za-z0-9_-]+', value)
+    if not identifier(catalog.get('id')) or not isinstance(catalog.get('description'), str):
+        raise ToolError('Rule catalog needs an ID and description')
+    rules = catalog.get('rules')
+    if not isinstance(rules, list) or not rules:
+        raise ToolError('Rule catalog must contain a nonempty rules array')
+    seen, expressions = set(), []
+    for rule in rules:
+        if not isinstance(rule, dict) or not identifier(rule.get('id')) or rule['id'] in seen:
+            raise ToolError('Each rule needs a unique ID')
+        expression = rule.get('expression')
+        if (not isinstance(rule.get('description'), str) or not isinstance(expression, str)
+                or not expression or expression.startswith('#')
+                or any(ord(char) < 32 or ord(char) > 126 for char in expression)):
+            raise ToolError(f'Rule {rule["id"]} needs a description and a single printable ASCII expression')
+        seen.add(rule['id'])
+        expressions.append(expression)
+    digest = hashlib.sha256(json.dumps(expressions, separators=(',', ':')).encode('ascii')).hexdigest()
+    native = work / 'selected.rule'
+    native.write_text('\n'.join(expressions) + '\n', encoding='ascii')
+    return native, dict(catalog, path=str(path), sha256=digest)
+
+
+def select_profile(ssid, ssid_rules, rules, root):
+    selected = storage.read_json(rules.resolve()) if rules and not ssid else None
+    wordlist_profile = ssid_rules or bool(
+        isinstance(selected, dict) and selected.get('type') == 'ssid_profile')
+    info, config = None, None
+    if ssid or wordlist_profile:
+        info, config = load_profile((rules or root / 'rules' / 'ssid.json').resolve())
+    return wordlist_profile, info, config
+
+
+def snapshot_wordlist(path, work):
+    snapshot = work / 'wordlist.txt'
+    shutil.copyfile(path, snapshot)
+    if not snapshot.stat().st_size:
+        raise ToolError('Wordlist is empty')
+    label = re.sub(r'[^A-Za-z0-9._-]', '_', path.stem).strip('.') or 'wordlist'
+    return snapshot, {'path': str(path), 'label': label, 'sha256': storage.fingerprint(snapshot)}
+
+
+def attempt_identity(record, wordinfo, rules_info, ssid, wordlist_profile):
+    source = source_info(bytes.fromhex(record['ssid_hex'])) if ssid else dict(type='wordlist', **wordinfo)
+    if wordlist_profile:
+        source.update(transformation='ssid_profile', generator=WORDLIST_GENERATOR)
+    key = (('ssid-' if ssid else WORDLIST_GENERATOR + '-' if wordlist_profile else '') + source['sha256']
+           + ('-' + rules_info['sha256'] if rules_info else ''))
+    return source, key, 'ssid' if ssid else wordinfo['label']
+
+
+def preview(text, config, limit):
+    seed = text.encode('utf-8')
+    if not 1 <= len(seed) <= 32:
+        raise ToolError('Preview SSID must contain 1–32 UTF-8 bytes')
+    candidates, stats = generate(seed, config)
+    print('SSID preview counts: ' + json.dumps(stats, sort_keys=True))
+    limit = min(len(candidates), limit)
+    print(f'Sample of {limit} eligible candidates out of {len(candidates)} (no captures read, no recovery):')
+    for index in range(limit):
+        print(json.dumps(candidates[index * len(candidates) // limit].decode('utf-8'), ensure_ascii=False))
