@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import tempfile
+import uuid
 
 
 def fingerprint(path):
@@ -41,6 +42,33 @@ def read_json(path):
 
 class CheckpointError(ValueError):
     """Saved resume state is unreadable or does not match its attempt."""
+
+
+def backup_checkpoint_for_restart(path, identity):
+    if not path.exists():
+        return None
+    try:
+        saved = read_json(path)
+    except (ValueError, UnicodeError, OSError):
+        saved = None
+    if isinstance(saved, dict) and 'identity' in saved and saved['identity'] != identity:
+        raise CheckpointError('Checkpoint identity does not match this attempt; saved state was preserved')
+    backup_dir = path.parent / 'backups'
+    backup_dir.mkdir(mode=0o700, exist_ok=True)
+    name_hash = hashlib.sha256(path.name.encode()).hexdigest()
+    backup = backup_dir / f'{name_hash}-{uuid.uuid4().hex}.json'
+    os.rename(path, backup)
+    directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+    directory = os.open(backup_dir, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+    return backup
 
 
 def read_checkpoint(path, identity):

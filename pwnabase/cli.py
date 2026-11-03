@@ -22,6 +22,8 @@ def main(argv=None):
     parser.add_argument('--rules', type=Path, help='JSON mutation catalog (opt-in)')
     parser.add_argument('--ssid-rules', action='store_true', help='Apply the SSID profile to external wordlist entries (default: SambaTu)')
     parser.add_argument('--retry-unusable', action='store_true')
+    parser.add_argument('--restart-incomplete', action='store_true',
+                        help='Back up matching incomplete transformed-wordlist checkpoints and restart them')
     parser.add_argument('--check', action='store_true', help='Verify tools and real recovery; process no captures')
     parser.add_argument('--device-types', choices=['1', '2', '1,2'], default='2',
                         help='OpenCL CPU (1), GPU (2, default), or both (1,2)')

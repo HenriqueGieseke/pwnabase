@@ -17,6 +17,7 @@ class RunConfig:
     preview_ssid: str | None = None
     preview_limit: int = 50
     retry_unusable: bool = False
+    restart_incomplete: bool = False
     check: bool = False
     device_types: str = '2'
     progress_interval: int = 10

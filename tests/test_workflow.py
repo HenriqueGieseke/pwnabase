@@ -289,6 +289,96 @@ else:
         self.assertEqual(generation['hashcat_confirmed_candidates'], 7680)
         self.assertEqual(generation['checkpointed_candidates'], 0)
 
+    def test_explicit_restart_preserves_corrupt_checkpoint_and_recovers(self):
+        record = tools.parse_record(tools.synthetic_record())
+        (self.captures / 'capture.pcap').write_text(tools.synthetic_record() + '\n')
+        output = self.root / 'out'
+        info, _ = candidates.load_profile(ROOT / 'rules/ssid.json')
+        wordinfo = {'path': str(self.words.resolve()), 'label': 'words',
+                    'sha256': storage.fingerprint(self.words)}
+        _, key, _ = candidates.attempt_identity(record, wordinfo, info, False, True)
+        checkpoint = storage.ResultStore(output).checkpoint_path(record['record_id'], key)
+        checkpoint.parent.mkdir(parents=True)
+        checkpoint.write_text('{broken')
+        unrelated = checkpoint.parent / 'unrelated.json'
+        unrelated.write_text('unrelated')
+        result = subprocess.run(self.command(output) + ['--ssid-rules', '--restart-incomplete'],
+                                capture_output=True, text=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        backups = list((checkpoint.parent / 'backups').glob('*.json'))
+        self.assertEqual(len(backups), 1)
+        self.assertEqual(backups[0].read_text(), '{broken')
+        self.assertEqual(unrelated.read_text(), 'unrelated')
+        self.assertIn('Restarting incomplete attempt', result.stdout)
+        self.assertEqual(len(list((output / 'complete').glob('*.json'))), 1)
+
+    def test_restart_backs_up_matching_identity_and_refuses_mismatch(self):
+        checkpoint = self.root / 'checkpoint.json'
+        identity = {'record_id': 'synthetic'}
+        storage.atomic_json(checkpoint, {'identity': identity, 'progress': 42})
+        original = checkpoint.read_bytes()
+        backup = storage.backup_checkpoint_for_restart(checkpoint, identity)
+        self.assertEqual(backup.read_bytes(), original)
+        self.assertFalse(checkpoint.exists())
+        storage.atomic_json(checkpoint, {'identity': {'record_id': 'other'}})
+        original = checkpoint.read_bytes()
+        with self.assertRaises(storage.CheckpointError):
+            storage.backup_checkpoint_for_restart(checkpoint, identity)
+        self.assertEqual(checkpoint.read_bytes(), original)
+
+    def test_restart_does_not_change_completed_result(self):
+        (self.captures / 'capture.pcap').write_text(tools.synthetic_record() + '\n')
+        output = self.root / 'out'
+        command = self.command(output) + ['--ssid-rules']
+        first = subprocess.run(command, capture_output=True, text=True, timeout=20)
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        completed = next((output / 'complete').glob('*.json'))
+        original = completed.read_bytes()
+        inode = completed.stat().st_ino
+        (self.captures / 'second.pcap').write_text(tools.synthetic_record() + '\n')
+        restarted = subprocess.run(command + ['--restart-incomplete'],
+                                   capture_output=True, text=True, timeout=20)
+        self.assertEqual(restarted.returncode, 0, restarted.stdout + restarted.stderr)
+        self.assertEqual(completed.read_bytes(), original)
+        self.assertEqual(completed.stat().st_ino, inode)
+
+    def test_explicit_restart_replays_a_previously_confirmed_batch(self):
+        (self.captures / 'capture.pcap').write_text(tools.synthetic_record() + '\n')
+        self.words.write_bytes(b'unrelatedfixture\n' * 9 + b'testpass123\n')
+        output = self.root / 'out'
+        calls, marker, log = (self.root / name for name in ('calls', 'marker', 'batches'))
+        env = os.environ.copy()
+        env.update(PWNABASE_TEST_HASHCAT_CALLS=str(calls), PWNABASE_TEST_BLOCK_HASHCAT_CALL='3',
+                   PWNABASE_TEST_HASHCAT_MARKER=str(marker), PWNABASE_TEST_BATCH_LOG=str(log))
+        command = self.command(output) + ['--ssid-rules']
+        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                   text=True, env=env)
+        try:
+            deadline = time.monotonic() + 10
+            while not marker.exists() and process.poll() is None and time.monotonic() < deadline:
+                time.sleep(.02)
+            self.assertTrue(marker.exists())
+            process.send_signal(signal.SIGINT)
+            process.communicate(timeout=10)
+            self.assertEqual(process.returncode, 130)
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.communicate(timeout=10)
+            process.stdout.close()
+            process.stderr.close()
+        checkpoint = next((output / '.pwnabase/checkpoints').glob('*.json'))
+        original = checkpoint.read_bytes()
+        env.pop('PWNABASE_TEST_BLOCK_HASHCAT_CALL')
+        result = subprocess.run(command + ['--restart-incomplete'], capture_output=True,
+                                text=True, timeout=20, env=env)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        backup = next((checkpoint.parent / 'backups').glob('*.json'))
+        self.assertEqual(backup.read_bytes(), original)
+        batches = log.read_text().splitlines()
+        self.assertEqual(batches[0], batches[2])
+        self.assertIn('Restarting incomplete attempt', result.stdout)
+
     def test_exhaustion_filename_matches_pre_refactor_contract(self):
         (self.captures / 'capture.pcap').write_text(tools.synthetic_record() + '\n')
         # Preflight must still recover its fixed known password; target attempts

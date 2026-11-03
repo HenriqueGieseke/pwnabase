@@ -71,7 +71,9 @@ On reruns:
 - Unchanged unusable captures are skipped unless `--retry-unusable` is supplied. Recheck these after upgrading the extractor if needed.
 - Tool errors are retried automatically, and their corresponding error files are removed after a successful retry.
 
-Each batch snapshots its wordlist and each capture before processing. Original captures and wordlists are never changed. Stop with Ctrl+C to terminate the active tool and preserve completed results; an unfinished attempt starts again from the beginning next time. Results are written atomically, and a lock prevents concurrent batches sharing one output directory.
+Each batch snapshots its wordlist and each capture before processing. Original captures and wordlists are never changed. Stop with Ctrl+C to terminate the active tool and preserve completed results. Transformed-wordlist attempts resume from their last confirmed checkpoint; the unfinished candidate batch may be replayed. Other unfinished attempts restart from the beginning. Results are written atomically, and a lock prevents concurrent batches sharing one output directory.
+
+To deliberately restart matching incomplete transformed-wordlist attempts, add `--restart-incomplete` to the same recovery command. The previous checkpoint is backed up; completed and historical results remain in place.
 
 Missing shared dependencies or an unusable compute backend stop the batch during preflight. Individual extraction or recovery errors are recorded and processing continues. A failure to write the output itself can prevent further processing.
 

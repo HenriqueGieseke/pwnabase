@@ -250,9 +250,10 @@ def process_capture(path, context, counts):
             previous_path, previous = store.previous_attempt(record_id, attempt_key, label)
             if previous:
                 print(f'  Skipped {record_id[:12]}: {previous["status"]} (matching saved result).', flush=True)
-                for item in provenance['sources']:
-                    storage.add_source(previous, item)
-                storage.atomic_json(previous_path, previous)
+                if not config.restart_incomplete:
+                    for item in provenance['sources']:
+                        storage.add_source(previous, item)
+                    storage.atomic_json(previous_path, previous)
                 store.clear(error)
                 counts['skipped_' + previous['status']] += 1
                 continue
@@ -260,6 +261,12 @@ def process_capture(path, context, counts):
             if wordlist_profile:
                 checkpoint_identity = _checkpoint_identity(record, wordinfo, rules_info)
                 checkpoint_path = store.checkpoint_path(record_id, attempt_key)
+                if config.restart_incomplete:
+                    backup = storage.backup_checkpoint_for_restart(checkpoint_path, checkpoint_identity)
+                    if backup:
+                        print(f'  Restarting incomplete attempt {record_id[:12]} '
+                              f'(wordlist {wordinfo["sha256"][:12]}, profile {rules_info["sha256"][:12]}); '
+                              f'previous checkpoint backed up to {backup}.', flush=True)
                 checkpoint = storage.read_checkpoint(checkpoint_path, checkpoint_identity)
             print(f'  Attempting {record_id[:12]}: SSID={json.dumps(record["ssid"])} BSSID={record["bssid"]}', flush=True)
             attempt_started = time.monotonic()
@@ -305,6 +312,8 @@ def run(config):
         config = config.normalized()
         prepared = candidates.PreparedCandidates(*candidates.select_profile(
             config.ssid, config.ssid_rules, config.rules, ROOT))
+        if config.restart_incomplete and (not prepared.wordlist_profile or config.check):
+            raise ValueError('--restart-incomplete requires a transformed-wordlist recovery run')
         if config.preview_ssid is not None:
             candidates.preview(config.preview_ssid, prepared.ssid_config, config.preview_limit)
             return BatchResult(0, dict(counts), stats.records_seen, stats.captures_visited)
