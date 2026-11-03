@@ -1,0 +1,17 @@
+{
+  "baseline": "4666f55",
+  "complete_filename": "68c346d11c79cc54455f7028066b0daabd0eba2d4c71743597664a76d746dca8.json",
+  "exhausted_filename": "68c346d11c79cc54455f7028066b0daabd0eba2d4c71743597664a76d746dca8-be599b491ec37379df6a1064afbd29467db30d8b7e875aa587a3e5897a88d188.json",
+  "record": {
+    "record_id": "68c346d11c79cc54455f7028066b0daabd0eba2d4c71743597664a76d746dca8",
+    "hashcat_record": "WPA*01*2fe61a92ed6a7962bd55803d5ae8a5be*020000000001*020000000002*70776e61626173652d73656c662d74657374***",
+    "kind": "pmkid",
+    "bssid": "02:00:00:00:00:01",
+    "client_mac": "02:00:00:00:00:02",
+    "ssid": "pwnabase-self-test",
+    "ssid_hex": "70776e61626173652d73656c662d74657374"
+  },
+  "wordlist_sha256": "be599b491ec37379df6a1064afbd29467db30d8b7e875aa587a3e5897a88d188",
+  "password": "testpass123",
+  "password_hex": "7465737470617373313233"
+}

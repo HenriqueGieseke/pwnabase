@@ -11,3 +11,7 @@ Use the five canonical labels. Read docs/agents/triage-labels.md before assignin
 ### Domain docs
 
 Use the single-context layout. Read docs/agents/domain.md before exploring domain behavior or proposing architecture changes.
+
+### Architecture and verification
+
+Read docs/architecture.md before changing recovery modules or choosing verification commands.

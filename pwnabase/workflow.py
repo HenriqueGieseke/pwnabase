@@ -261,4 +261,3 @@ def run(config):
     except (OSError, ValueError, ToolError, subprocess.TimeoutExpired) as exc:
         print(f'Cannot run batch: {exc}', file=sys.stderr)
         return BatchResult(2, dict(counts), stats.records_seen, stats.captures_visited)
-

@@ -105,6 +105,9 @@ independently of the caller's current directory. Use explicit temporary input an
 output paths for experiments. The workflow retains the CLI's private umask and
 console logs; it is a sequential local workflow, not a concurrent job scheduler.
 
+See [the architecture guide](docs/architecture.md) for module ownership,
+configuration/results, compatibility constraints and verification commands.
+
 The agreed scope is recorded in [DESIGN.md](DESIGN.md), with domain terms in [GLOSSARY.md](GLOSSARY.md). Wardriving imports and a database are deferred.
 
 ## SSID-derived experiments

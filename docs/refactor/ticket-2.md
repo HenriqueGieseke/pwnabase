@@ -36,5 +36,6 @@ module. Continue with ticket 3 for centralized storage; candidate preparation is
 ticket 4. The agreed package responsibilities are not all implemented by this
 first ticket.
 
-Preserve the existing uncommitted setup and design documentation alongside this
-implementation. Commit and push only after owner approval.
+The approved setup and design documentation was included in d7a48d4. After this
+ticket's approval, the owner authorized automatic commits and pushes for later
+tickets when their checks and review pass without requiring a new design decision.
