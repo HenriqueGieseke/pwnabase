@@ -91,6 +91,26 @@ def checkpoint_status(output):
     return BatchResult(1 if errors else 0, {'invalid_checkpoints': errors})
 
 
+def report_workload(config, prepared, wordlist):
+    if not config.handshakes.is_dir():
+        raise ToolError(f'Capture directory does not exist: {config.handshakes}')
+    captures = sum(1 for path in config.handshakes.iterdir()
+                   if path.is_file() and path.suffix.lower() in EXTENSIONS)
+    seeds, sampled, eligible = candidates.estimate_wordlist(wordlist, prepared.ssid_config)
+    maximum = prepared.rules_info['maximum_generated']
+    estimate = (eligible * seeds + sampled // 2) // sampled
+    print(f'\n[Workload estimate] {captures:,} capture files; wordlist {config.wordlist.name} '
+          f'({seeds:,} entries); '
+          f'profile {prepared.rules_info["id"]}.')
+    print(f'  Theoretical maximum: {maximum:,} combinations per word; '
+          f'{seeds * maximum:,} per authentication record before filtering and deduplication.')
+    print(f'  Sampled estimate: about {estimate:,} eligible candidates per record, '
+          f'from the first {sampled:,} wordlist entries after filtering and per-word deduplication '
+          '(prefix sample may not represent the full wordlist).')
+    print('  Capture files may contain multiple records; the total across records is unknown.')
+    print('  Measured throughput: unavailable before recovery; runtime and ETA: unknown.\n', flush=True)
+
+
 def _combined_generation(previous, current):
     result = {
         key: previous.get(key, 0) + current.get(key, 0)
@@ -363,6 +383,18 @@ def run(config):
         except (OSError, ValueError) as exc:
             print(f'Cannot read status: {exc}', file=sys.stderr)
             return BatchResult(2)
+    if config.estimate_only:
+        try:
+            config = config.normalized()
+            prepared = candidates.PreparedCandidates(*candidates.select_profile(
+                config.ssid, config.ssid_rules, config.rules, ROOT))
+            if not prepared.wordlist_profile:
+                raise ValueError('--estimate-only requires a transformed-wordlist profile')
+            report_workload(config, prepared, config.wordlist)
+            return BatchResult(0)
+        except (OSError, ValueError, ToolError) as exc:
+            print(f'Cannot estimate workload: {exc}', file=sys.stderr)
+            return BatchResult(2)
     batch_started = time.monotonic()
     os.umask(0o077)
     counts = Counter()
@@ -396,6 +428,11 @@ def run(config):
                 print('\n[Preparation] PMKID and EAPOL are captured authentication verification records; '
                       'wordlist exhaustion means no eligible candidate matched.\n', flush=True)
                 print(f'Output: {config.output}; requested OpenCL device types: {config.device_types}', flush=True)
+                wordlist, wordinfo, label = None, None, 'ssid'
+                if prepared.wordlist_profile and not config.check:
+                    wordlist, wordinfo = candidates.snapshot_wordlist(config.wordlist, work)
+                    label = wordinfo['label']
+                    report_workload(config, prepared, wordlist)
                 if config.rules and not config.ssid and not prepared.wordlist_profile:
                     native, info = candidates.load_rules(config.rules.resolve(), work)
                     prepared = replace(prepared, native_rules=native, rules_info=info)
@@ -418,8 +455,7 @@ def run(config):
                     return BatchResult(0, dict(counts), stats.records_seen, stats.captures_visited)
                 if not config.handshakes.is_dir():
                     raise ToolError(f'Capture directory does not exist: {config.handshakes}')
-                wordlist, wordinfo, label = None, None, 'ssid'
-                if not config.ssid:
+                if not config.ssid and wordlist is None:
                     wordlist, wordinfo = candidates.snapshot_wordlist(config.wordlist, work)
                     label = wordinfo['label']
                 store = storage.ResultStore(config.output)

@@ -27,6 +27,7 @@ def main(argv=None):
                         help='Back up matching incomplete transformed-wordlist checkpoints and restart them')
     parser.add_argument('--check', action='store_true', help='Verify tools and real recovery; process no captures')
     parser.add_argument('--status', action='store_true', help='Read saved checkpoint progress without starting a batch')
+    parser.add_argument('--estimate-only', action='store_true', help='Estimate transformed-wordlist work without running recovery')
     parser.add_argument('--device-types', choices=['1', '2', '1,2'], default='2',
                         help='OpenCL CPU (1), GPU (2, default), or both (1,2)')
     parser.add_argument('--progress-interval', type=int, default=10, help='Seconds between progress updates; 0 disables them')

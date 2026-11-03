@@ -343,6 +343,24 @@ def snapshot_wordlist(path, work):
     return snapshot, {'path': str(path), 'label': label, 'sha256': storage.fingerprint(snapshot)}
 
 
+def estimate_wordlist(path, config, sample_size=3):
+    """Count source lines and sample a bounded prefix without saving candidate data."""
+    seeds = eligible = sampled = 0
+    with path.open('rb') as stream:
+        for line in stream:
+            seeds += 1
+            if sampled < sample_size:
+                seed = line[:-1] if line.endswith(b'\n') else line
+                if seed.endswith(b'\r') and line.endswith(b'\n'):
+                    seed = seed[:-1]
+                generated, _ = generate(seed, config)
+                eligible += len(generated)
+                sampled += 1
+    if not seeds:
+        raise ToolError('Wordlist is empty')
+    return seeds, sampled, eligible
+
+
 def attempt_identity(record, wordinfo, rules_info, ssid, wordlist_profile):
     source = source_info(bytes.fromhex(record['ssid_hex'])) if ssid else dict(type='wordlist', **wordinfo)
     if wordlist_profile:

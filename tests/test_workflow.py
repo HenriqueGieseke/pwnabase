@@ -461,6 +461,45 @@ else:
                 self.assertNotIn('secret-fixture-word', log.getvalue())
                 self.assertNotIn('testpass123', log.getvalue())
 
+    def test_estimate_only_is_read_only_and_reports_separate_categories(self):
+        (self.captures / 'capture.pcap').write_text(tools.synthetic_record() + '\n')
+        self.words.write_bytes(b'secret-fixture-word\nsecond-fixture-word\n')
+        original = self.words.read_bytes()
+        for profile, limit in [('full', '115,201'), ('light', '973')]:
+            output = self.root / ('estimate-' + profile)
+            saved = output / '.pwnabase' / 'checkpoints' / 'untouched.json'
+            saved.parent.mkdir(parents=True)
+            saved.write_text('saved-state-fixture')
+            command = [sys.executable, str(ROOT / 'recover.py'), '--handshakes', str(self.captures),
+                       '--wordlist', str(self.words), '--output', str(output), '--ssid-rules', profile,
+                       '--estimate-only', '--hashcat', 'missing-tool', '--extractor', 'missing-tool']
+            result = subprocess.run(command, capture_output=True, text=True, timeout=20)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn(limit, result.stdout)
+            self.assertIn('words.txt', result.stdout)
+            for category in ('Theoretical', 'Sampled', 'Measured throughput', 'unknown'):
+                self.assertIn(category, result.stdout)
+            self.assertNotIn('secret-fixture-word', result.stdout + result.stderr)
+            self.assertEqual(saved.read_text(), 'saved-state-fixture')
+            self.assertEqual(list(saved.parent.iterdir()), [saved])
+            self.assertEqual(self.words.read_bytes(), original)
+        absent = self.root / 'no-output-created'
+        command[command.index('--output') + 1] = str(absent)
+        result = subprocess.run(command, capture_output=True, text=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(absent.exists())
+
+    def test_normal_transformed_run_reports_workload_before_attempt(self):
+        (self.captures / 'capture.pcap').write_text(tools.synthetic_record() + '\n')
+        for profile in ('full', 'light'):
+            result = subprocess.run(self.command(self.root / profile) + ['--ssid-rules', profile],
+                                    capture_output=True, text=True, timeout=20)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn('[Workload estimate]', result.stdout)
+            self.assertLess(result.stdout.index('[Workload estimate]'), result.stdout.index('[Recovery]'))
+            self.assertIn('runtime and ETA: unknown', result.stdout)
+            self.assertNotIn('testpass123', result.stdout + result.stderr)
+
     def test_exhaustion_filename_matches_pre_refactor_contract(self):
         (self.captures / 'capture.pcap').write_text(tools.synthetic_record() + '\n')
         # Preflight must still recover its fixed known password; target attempts

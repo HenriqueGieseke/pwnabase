@@ -80,6 +80,12 @@ transformed-wordlist checkpoints without interrupting a running batch. It report
 only confirmed, saved progress; work in the current batch may not appear yet. Use
 the same `--output` option as the batch if results are stored elsewhere.
 
+Transformed-wordlist runs print a workload estimate before recovery. To see it
+without starting recovery or changing saved state, use
+`python3 recover.py --ssid-rules light --estimate-only` (or omit `light` for the full profile).
+The sample uses only the first few wordlist entries, so its projection can be
+unrepresentative. The report does not invent a runtime before measuring throughput.
+
 Missing shared dependencies or an unusable compute backend stop the batch during preflight. Individual extraction or recovery errors are recorded and processing continues. A failure to write the output itself can prevent further processing.
 
 Exit codes: `0` means the batch completed without tool errors (exhaustion and unusable captures are valid outcomes); `1` means individual tool errors occurred; `2` means startup or shared infrastructure failed; `130` means interrupted.
