@@ -41,12 +41,13 @@ elif '-o' in args:
         (pathlib.Path(__file__).parent / 'blocked.pid').write_text(str(os.getpid()))
         time.sleep(30)
     pathlib.Path(args[1]).write_text(source)
-elif '--hex-wordlist' in args:
+elif '--stdin-timeout-abort=0' in args:
     sys.stdin.buffer.read(1)
     sys.exit(1)
 else:
     outfile = pathlib.Path(args[args.index('--outfile') + 1])
-    words = pathlib.Path(args[args.index('--outfile') + 3]).read_bytes().splitlines()
+    lines = pathlib.Path(args[args.index('--outfile') + 3]).read_bytes().splitlines()
+    words = [bytes.fromhex(line.decode()) for line in lines] if '--hex-wordlist' in args else lines
     if b'testpass123' not in words:
         sys.exit(1)
     outfile.write_text(b'testpass123'.hex() + '\\n')
@@ -91,6 +92,45 @@ else:
             again = workflow.run(self.config(direct_output))
         self.assertEqual(again.counts, {'skipped_recovered': 1})
         self.assertEqual(first.stat().st_mode & 0o777, 0o600)
+
+    def test_transformed_wordlist_uses_confirmed_batches_and_stops_on_recovery(self):
+        (self.captures / 'capture.pcap').write_text(tools.synthetic_record() + '\n')
+        self.words.write_bytes(b'unrelatedfixture\n' * 9 + b'testpass123\n')
+        original_words = self.words.read_bytes()
+        output = self.root / 'out'
+        log = io.StringIO()
+        with contextlib.redirect_stdout(log):
+            result = workflow.run(replace(self.config(output), ssid_rules=True))
+        self.assertEqual(result.exit_code, 0)
+        self.assertEqual(result.counts, {'recovered': 1})
+        self.assertIn('Candidate batch 1 complete:', log.getvalue())
+        self.assertIn('Recovered in candidate batch 2', log.getvalue())
+        self.assertNotIn('testpass123', log.getvalue())
+        self.assertEqual(self.words.read_bytes(), original_words)
+        self.assertEqual(len(list((output / 'complete').glob('*.json'))), 1)
+        self.assertEqual(list((output / '.pwnabase').glob('work-*')), [])
+
+    def test_transformed_wordlist_exhaustion_waits_for_all_confirmed_batches(self):
+        (self.captures / 'capture.pcap').write_text(tools.synthetic_record() + '\n')
+        self.words.write_bytes(b'unrelatedfixture\n' * 9 + b'testpass123\n')
+        script = self.tool.read_text().replace(
+            "    outfile = pathlib.Path(args[args.index('--outfile') + 1])",
+            "    if not any('self-test.txt' in arg for arg in args):\n        sys.exit(1)\n"
+            "    outfile = pathlib.Path(args[args.index('--outfile') + 1])")
+        self.tool.write_text(script)
+        output = self.root / 'out'
+        log = io.StringIO()
+        with contextlib.redirect_stdout(log):
+            result = workflow.run(replace(self.config(output), ssid_rules=True))
+        self.assertEqual(result.exit_code, 0)
+        self.assertEqual(result.counts, {'wordlist_exhausted': 1})
+        exhausted = json.loads(next((output / 'exhausted/words').glob('*.json')).read_text())
+        self.assertEqual(exhausted['status'], 'wordlist_exhausted')
+        self.assertTrue(exhausted['candidate_generation']['source_complete'])
+        self.assertEqual(exhausted['candidate_generation']['eligible'], 76_800)
+        self.assertIn('Candidate batch 1 complete: 65,536 candidates', log.getvalue())
+        self.assertIn('Candidate batch 2 complete: 11,264 candidates', log.getvalue())
+        self.assertEqual(list((output / 'tool-error').glob('*.json')), [])
 
     def test_exhaustion_filename_matches_pre_refactor_contract(self):
         (self.captures / 'capture.pcap').write_text(tools.synthetic_record() + '\n')
@@ -150,16 +190,16 @@ else:
         self.assertEqual(list((output / 'tool-error').glob('*.json')), [])
 
     def test_incomplete_stream_is_error_and_never_saved_as_exhausted(self):
-        (self.captures / 'capture.pcap').write_text(tools.synthetic_record() + '\n')
-        output = self.root / 'out'
-        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-            result = workflow.run(replace(self.config(output), ssid_rules=True))
-        self.assertEqual(result.exit_code, 1)
-        self.assertEqual(result.counts, {'tool_error': 1})
-        error = json.loads(next((output / 'tool-error').glob('*.json')).read_text())
-        self.assertIn('before candidate generation completed', error['error'])
-        self.assertFalse(error['candidate_generation']['source_complete'])
-        self.assertEqual(list((output / 'exhausted').glob('*/*.json')), [])
+        class IncompleteSource:
+            stats = {'source_complete': False}
+            def __call__(self, stop):
+                yield b'7465737470617373313233\n'
+
+        with self.assertRaisesRegex(tools.ToolError, 'before candidate generation completed'):
+            tools.recover(tools.parse_record(tools.synthetic_record()), None,
+                          self.config(self.root / 'out'), os.environ.copy(), self.root,
+                          use_rules=False, hex_wordlist=True,
+                          candidate_stream=IncompleteSource())
 
     def test_interrupt_preserves_completed_results_and_restart(self):
         (self.captures / 'a-good.pcap').write_text(tools.synthetic_record() + '\n')

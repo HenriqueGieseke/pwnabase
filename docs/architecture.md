@@ -78,10 +78,15 @@ batch lock applies to one output location on one machine. It is not a distribute
 lock. Failed input processing remains isolated from later eligible inputs; shared
 startup failures stop the run.
 
-Candidate streaming retains one seed's generated candidates and bounded output
-chunks, with deduplication per seed. This bounds memory growth across a wordlist,
-not total work: a large profile can generate very many candidates. Source
-completion is required before declaring a streamed attempt exhausted.
+Transformed wordlist attempts retain one seed's generated candidates at a time
+and write bounded temporary candidate batches for Hashcat. Each fully exhausted
+batch is confirmed before processing continues; a recovered password can stop
+Hashcat partway through its current batch. Batch size adapts to measured
+end-to-end generation, file-writing, and Hashcat time toward roughly one minute,
+with an explicit maximum. Candidate
+deduplication remains per seed. This bounds memory and temporary-file size, not
+total work: a large profile can still generate very many candidates. The source
+must be fully generated before declaring the attempt exhausted.
 
 Returned diagnostic tails and in-memory parsing are bounded. The inherited
 temporary output spool has no disk cap. Raw diagnostic text can contain secrets

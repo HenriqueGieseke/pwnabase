@@ -70,8 +70,8 @@ def attempt_record(record, context, outcome):
     elif context.candidates.wordlist_profile:
         stream = candidates.WordlistCandidates(wordlist, context.candidates.ssid_config)
         try:
-            outcome.password = tools.recover(record, None, context.tools, env, work, use_rules=False,
-                               hex_wordlist=True, candidate_stream=stream)
+            outcome.password = tools.recover_candidate_batches(
+                record, stream, context.tools, env, work)
         finally:
             outcome.generation = dict(stream.stats)
             print('  Wordlist profile counts: ' + json.dumps(outcome.generation, sort_keys=True), flush=True)
@@ -208,7 +208,11 @@ def run(config):
                 if config.ssid or prepared.wordlist_profile:
                     print(f'Generation profile: {prepared.rules_info["id"]}; fingerprint {prepared.rules_info["sha256"][:12]}; candidate generation limit 1,000,000 per seed.', flush=True)
                     if prepared.wordlist_profile:
-                        print(f'Applying profile to wordlist entries via streaming stdin: up to {prepared.rules_info["maximum_generated"]:,} combinations per entry before deduplication. Total count and ETA are unavailable; this can substantially increase runtime.', flush=True)
+                        print(f'Applying profile to wordlist entries in temporary candidate batches: '
+                              f'up to {prepared.rules_info["maximum_generated"]:,} combinations per entry '
+                              f'before deduplication. Initial batch: {tools.INITIAL_CANDIDATE_BATCH:,}; '
+                              f'later batches target about {tools.CANDIDATE_BATCH_TARGET_SECONDS}s from '
+                              f'measured throughput (maximum {tools.MAX_CANDIDATE_BATCH:,}).', flush=True)
                 elif prepared.native_rules:
                     tools.validate_rules(tool_config, prepared.rules_info, env, work)
                 else:
