@@ -1,7 +1,9 @@
 """Candidate sources, profiles, native rules and byte-safe generation."""
 
+from dataclasses import dataclass
 import hashlib
 import json
+from pathlib import Path
 import re
 import shutil
 
@@ -261,3 +263,11 @@ def preview(text, config, limit):
     print(f'Sample of {limit} eligible candidates out of {len(candidates)} (no captures read, no recovery):')
     for index in range(limit):
         print(json.dumps(candidates[index * len(candidates) // limit].decode('utf-8'), ensure_ascii=False))
+
+
+@dataclass(frozen=True)
+class PreparedCandidates:
+    wordlist_profile: bool = False
+    rules_info: dict | None = None
+    ssid_config: dict | None = None
+    native_rules: Path | None = None

@@ -1,4 +1,3 @@
-import argparse
 from collections import Counter
 import contextlib
 import io
@@ -12,7 +11,8 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import recover
+from pwnabase import cli, workflow
+from pwnabase.config import ROOT, RunConfig, ToolConfig
 from pwnabase import storage
 from pwnabase import tools
 from pwnabase import candidates as ssid
@@ -24,7 +24,7 @@ class SSIDTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
-        self.catalog = json.loads((recover.ROOT / 'rules/ssid.json').read_text())
+        self.catalog = json.loads((ROOT / 'rules/ssid.json').read_text())
         self.profile = self.root / 'profile.json'
         self.save_profile()
         self.info, self.config = ssid.load_profile(self.profile)
@@ -84,9 +84,9 @@ class SSIDTests(unittest.TestCase):
 
     def test_preview_never_reads_captures_or_runs_tools(self):
         output = io.StringIO()
-        with patch.object(tools, 'run_tool') as tool, patch.object(recover, 'process_capture') as process:
+        with patch.object(tools, 'run_tool') as tool, patch.object(workflow, 'process_capture') as process:
             with contextlib.redirect_stdout(output):
-                code = recover.main(['--preview-ssid', 'Minha Rede', '--preview-limit', '4',
+                code = cli.main(['--preview-ssid', 'Minha Rede', '--preview-limit', '4',
                                      '--output', str(self.root / 'must-not-exist')])
         self.assertEqual(code, 0)
         self.assertIn('Sample of 4', output.getvalue())
@@ -94,27 +94,29 @@ class SSIDTests(unittest.TestCase):
         tool.assert_not_called()
         process.assert_not_called()
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
-            recover.main(['--ssid', '--wordlist', 'example.txt'])
+            cli.main(['--ssid', '--wordlist', 'example.txt'])
 
     def process(self, seed, words=None):
         capture = self.root / 'fixture.pcap'
         capture.write_bytes(b'fixture only')
-        args = argparse.Namespace(output=self.root, retry_unusable=False, extractor='extractor',
-                                  ssid=True, rules_info=self.info, ssid_config=self.config)
+        config = RunConfig(output=self.root, ssid=True)
+        prepared = ssid.PreparedCandidates(rules_info=self.info, ssid_config=self.config)
         def extract(command, *unused, **kwargs):
-            Path(command[2]).write_text(recover.synthetic_record(ssid=seed) + '\n')
+            Path(command[2]).write_text(tools.synthetic_record(ssid=seed) + '\n')
             return 0, ''
         counts = Counter()
         with patch.object(tools, 'run_tool', side_effect=extract), contextlib.redirect_stdout(io.StringIO()):
-            recover.process_capture(capture, args, {}, self.root, words, None, counts)
+            context = workflow.BatchContext(config, prepared, ToolConfig(extractor='extractor'),
+                                            {}, self.root, words, None)
+            workflow.process_capture(capture, context, counts)
         return counts
 
     def test_attempt_identity_and_global_success_skip(self):
         # Same wordlist exhaustion cannot suppress an SSID experiment.
-        record = recover.parse_record(recover.synthetic_record(ssid=b'Minha Rede'))
+        record = tools.parse_record(tools.synthetic_record(ssid=b'Minha Rede'))
         old = self.root / 'exhausted' / 'ssid' / f'{record["record_id"]}-unrelated.json'
         storage.atomic_json(old, {'status': 'wordlist_exhausted'})
-        with patch.object(recover, 'recover', return_value=None) as crack:
+        with patch.object(tools, 'recover', return_value=None) as crack:
             self.assertEqual(self.process(b'Minha Rede'), {'candidates_exhausted': 1})
             self.assertEqual(self.process(b'Minha Rede'), {'skipped_candidates_exhausted': 1})
             self.assertEqual(crack.call_count, 1)
@@ -123,7 +125,7 @@ class SSIDTests(unittest.TestCase):
             self.info, self.config = ssid.load_profile(self.profile)
             self.assertEqual(self.process(b'Minha Rede'), {'candidates_exhausted': 1})
             self.assertEqual(crack.call_count, 2)
-        with patch.object(recover, 'recover', return_value=b'fixture-password'):
+        with patch.object(tools, 'recover', return_value=b'fixture-password'):
             self.catalog['rules'][4]['years']['end'] = 2028
             self.save_profile()
             self.info, self.config = ssid.load_profile(self.profile)
@@ -133,12 +135,12 @@ class SSIDTests(unittest.TestCase):
         self.assertIsNone(result['wordlist'])
         self.assertEqual(result['rules']['id'], self.info['id'])
         self.assertGreater(result['candidate_generation']['eligible'], 0)
-        with patch.object(recover, 'recover') as crack:
+        with patch.object(tools, 'recover') as crack:
             self.assertEqual(self.process(b'Minha Rede'), {'skipped_recovered': 1})
             crack.assert_not_called()
 
     def test_no_eligible_candidates_is_saved_and_skipped_without_hashcat(self):
-        with patch.object(recover, 'recover') as crack:
+        with patch.object(tools, 'recover') as crack:
             self.assertEqual(self.process(b'\xff'), {'no_eligible_candidates': 1})
             self.assertEqual(self.process(b'\xff'), {'skipped_no_eligible_candidates': 1})
             crack.assert_not_called()
@@ -157,7 +159,7 @@ class SSIDRealToolsTests(unittest.TestCase):
             captures.mkdir()
             (captures / 'pmkid.pcap').write_bytes(capture_bytes([('só rede'.encode(), b'SoRede2000!')]))
             (captures / 'eapol.pcap').write_bytes(capture_bytes([(b'minha rede', b'Minha-Rede2000!')], eapol=True))
-            profile = json.loads((recover.ROOT / 'rules/ssid.json').read_text())
+            profile = json.loads((ROOT / 'rules/ssid.json').read_text())
             profile['rules'][0]['values'] = ['preserve', 'strip']
             profile['rules'][1]['values'] = ['original', 'title']
             profile['rules'][2]['values'] = ['', '-']
@@ -165,7 +167,7 @@ class SSIDRealToolsTests(unittest.TestCase):
             profile['rules'][4].update(numbers={'start': 0, 'end': 1}, years={'start': 2000, 'end': 2000}, punctuation=['', '!'])
             path = root / 'profile.json'
             path.write_text(json.dumps(profile))
-            command = [sys.executable, str(recover.ROOT / 'recover.py'), '--ssid', '--rules', str(path),
+            command = [sys.executable, str(ROOT / 'recover.py'), '--ssid', '--rules', str(path),
                        '--handshakes', str(captures), '--output', str(root / 'out'), '--device-types', '1', '--progress-interval', '0']
             result = subprocess.run(command, capture_output=True, text=True, timeout=300)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -180,17 +182,17 @@ class SSIDRealToolsTests(unittest.TestCase):
             work = root / 'binary'
             work.mkdir()
             password = b'\xffab\ncdefg'
-            record = recover.parse_record(recover.synthetic_record(password=password, ssid=password))
+            record = tools.parse_record(tools.synthetic_record(password=password, ssid=password))
             candidates, stats = ssid.generate(password, ssid.load_profile(path)[1])
             self.assertFalse(stats['valid_utf8'])
             words = work / 'binary.hex'
             words.write_text('\n'.join(value.hex() for value in candidates) + '\n')
-            args = argparse.Namespace(hashcat='hashcat', device_types='1', native_rules=None)
+            args = ToolConfig(device_types='1')
             env = os.environ.copy()
             runtime = root / 'out/.pwnabase'
             env.update(XDG_DATA_HOME=str(runtime / 'data'), XDG_CACHE_HOME=str(runtime / 'cache'),
                        POCL_CACHE_DIR=str(runtime / 'pocl-cache'), PWNABASE_PROGRESS_INTERVAL='0')
-            self.assertEqual(recover.recover(record, words, args, env, work, use_rules=False, hex_wordlist=True), password)
+            self.assertEqual(tools.recover(record, words, args, env, work, use_rules=False, hex_wordlist=True), password)
             print('Real tools: accented SSID PMKID/EAPOL recovery, reruns and exact binary candidates passed.')
 
 

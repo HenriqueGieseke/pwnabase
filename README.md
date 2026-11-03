@@ -88,13 +88,22 @@ The real-tool integration test generates synthetic wireless packets, extracts PM
 
 Tool process execution lives in `pwnabase.tools`: subprocess groups, cancellation,
 timeouts, candidate stdin feeding, and filtered progress reporting share one
-interface. `recover.py` still owns the batch workflow and tool-specific commands
-during the incremental refactor. Run the focused harmless-process checks with
+interface. Tool-specific commands also live there. `pwnabase.workflow` coordinates
+the batch; `pwnabase.cli` translates arguments into immutable `RunConfig` values.
+`recover.py` is the command entry point. Run the focused harmless-process checks with
 `python3 -m unittest discover -s tests -p test_tools.py -v`. Returned diagnostic
 text can contain candidates; callers must filter it before logging and must not
 save it in results. The returned diagnostic tail and in-memory parsing are
 bounded; the temporary output spool can grow on disk. This existing limitation
 is retained by the behavior-preserving extraction.
+
+Local Python callers can pass a `RunConfig` from `pwnabase.config` to
+`pwnabase.workflow.run(config)`. It returns a `BatchResult` with `exit_code`,
+outcome `counts`, `records_seen` and `captures_visited`, without parsing arguments
+or exiting the calling process. Defaults resolve against the project root,
+independently of the caller's current directory. Use explicit temporary input and
+output paths for experiments. The workflow retains the CLI's private umask and
+console logs; it is a sequential local workflow, not a concurrent job scheduler.
 
 The agreed scope is recorded in [DESIGN.md](DESIGN.md), with domain terms in [GLOSSARY.md](GLOSSARY.md). Wardriving imports and a database are deferred.
 

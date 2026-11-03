@@ -1,4 +1,3 @@
-import argparse
 from collections import Counter
 import contextlib
 import hashlib
@@ -14,7 +13,9 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import recover
+from pwnabase import cli, workflow
+from pwnabase.config import ROOT, RunConfig, ToolConfig
+from dataclasses import replace
 from pwnabase import candidates, storage
 from pwnabase import tools
 
@@ -73,10 +74,11 @@ class BatchTests(unittest.TestCase):
         self.capture.write_bytes(b'fixture')
         self.words = self.root / 'words.txt'
         self.words.write_bytes(b'testpass123\n')
-        self.args = argparse.Namespace(output=self.root, retry_unusable=False, extractor='extractor')
+        self.config = RunConfig(output=self.root)
+        self.prepared = candidates.PreparedCandidates()
         self.info = {'label': 'words', 'sha256': storage.fingerprint(self.words), 'path': str(self.words)}
-        self.good = recover.synthetic_record()
-        self.other = recover.synthetic_record(b'different123', b'another-network')
+        self.good = tools.synthetic_record()
+        self.other = tools.synthetic_record(b'different123', b'another-network')
 
     def extract(self, command, *args, **kwargs):
         Path(command[2]).write_text(self.good + '\n' + self.other + '\n')
@@ -85,13 +87,15 @@ class BatchTests(unittest.TestCase):
     def process(self):
         counts = Counter()
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-            recover.process_capture(self.capture, self.args, {}, self.work, self.words, self.info, counts)
+            context = workflow.BatchContext(self.config, self.prepared, ToolConfig(extractor='extractor'),
+                                            {}, self.work, self.words, self.info)
+            workflow.process_capture(self.capture, context, counts)
         return counts
 
     def test_mixed_outcomes_skip_and_changed_wordlist(self):
         before = storage.fingerprint(self.capture)
         with patch.object(tools, 'run_tool', side_effect=self.extract), patch.object(
-                recover, 'recover', side_effect=[b'testpass123', None]) as crack:
+                tools, 'recover', side_effect=[b'testpass123', None]) as crack:
             self.assertEqual(self.process(), {'recovered': 1, 'wordlist_exhausted': 1})
             self.assertEqual(crack.call_count, 2)
         self.assertEqual(storage.fingerprint(self.capture), before)
@@ -99,7 +103,7 @@ class BatchTests(unittest.TestCase):
         self.assertEqual(len(successes), 1)
         self.assertEqual(storage.read_json(successes[0])['password'], 'testpass123')
         self.assertEqual(successes[0].stat().st_mode & 0o777, 0o600)
-        with patch.object(tools, 'run_tool', side_effect=self.extract), patch.object(recover, 'recover') as crack:
+        with patch.object(tools, 'run_tool', side_effect=self.extract), patch.object(tools, 'recover') as crack:
             self.assertEqual(self.process(), {'skipped_recovered': 1, 'skipped_wordlist_exhausted': 1})
             crack.assert_not_called()
             self.info['label'] = 'renamed'
@@ -108,16 +112,16 @@ class BatchTests(unittest.TestCase):
         self.words.write_bytes(b'changedpass\n')
         self.info['sha256'] = storage.fingerprint(self.words)
         with patch.object(tools, 'run_tool', side_effect=self.extract), patch.object(
-                recover, 'recover', return_value=b'different123') as crack:
+                tools, 'recover', return_value=b'different123') as crack:
             self.assertEqual(self.process(), {'skipped_recovered': 1, 'recovered': 1})
             self.assertEqual(crack.call_count, 1)
 
     def test_record_error_does_not_stop_next_record_and_is_retried(self):
         with patch.object(tools, 'run_tool', side_effect=self.extract), patch.object(
-                recover, 'recover', side_effect=[recover.ToolError('fixture error'), None]):
+                tools, 'recover', side_effect=[tools.ToolError('fixture error'), None]):
             self.assertEqual(self.process(), {'tool_error': 1, 'wordlist_exhausted': 1})
         with patch.object(tools, 'run_tool', side_effect=self.extract), patch.object(
-                recover, 'recover', return_value=b'testpass123') as crack:
+                tools, 'recover', return_value=b'testpass123') as crack:
             self.assertEqual(self.process(), {'recovered': 1, 'skipped_wordlist_exhausted': 1})
             self.assertEqual(crack.call_count, 1)
         self.assertEqual(list((self.root / 'tool-error').glob('*.json')), [])
@@ -127,16 +131,16 @@ class BatchTests(unittest.TestCase):
             self.assertEqual(self.process(), {'no_usable_handshake': 1})
             self.assertEqual(self.process(), {'skipped_unusable': 1})
             self.assertEqual(extract.call_count, 1)
-            self.args.retry_unusable = True
+            self.config = replace(self.config, retry_unusable=True)
             self.assertEqual(self.process(), {'no_usable_handshake': 1})
-            self.args.retry_unusable = False
+            self.config = replace(self.config, retry_unusable=False)
             self.capture.write_bytes(b'changed capture')
             self.assertEqual(self.process(), {'no_usable_handshake': 1})
             self.assertEqual(extract.call_count, 3)
 
     def test_duplicate_capture_retains_both_source_paths(self):
         with patch.object(tools, 'run_tool', side_effect=self.extract), patch.object(
-                recover, 'recover', return_value=b'testpass123'):
+                tools, 'recover', return_value=b'testpass123'):
             self.process()
             duplicate = self.root / 'duplicate.pcap'
             duplicate.write_bytes(self.capture.read_bytes())
@@ -156,26 +160,26 @@ class BatchTests(unittest.TestCase):
 
     def test_rule_identity_and_exhaustion_are_independent(self):
         catalog = self.root / 'rules.json'
-        catalog.write_text((recover.ROOT / 'rules/basic.json').read_text())
+        catalog.write_text((ROOT / 'rules/basic.json').read_text())
         native, info = candidates.load_rules(catalog, self.work)
         self.assertEqual(len(native.read_text().splitlines()), 8)
         data = storage.read_json(catalog)
         data['description'] = 'Changed explanation'
         storage.atomic_json(catalog, data)
         self.assertEqual(candidates.load_rules(catalog, self.work)[1]['sha256'], info['sha256'])
-        with patch.object(tools, 'run_tool', side_effect=self.extract), patch.object(recover, 'recover', return_value=None):
+        with patch.object(tools, 'run_tool', side_effect=self.extract), patch.object(tools, 'recover', return_value=None):
             self.process()
-            self.args.rules_info = info
+            self.prepared = replace(self.prepared, rules_info=info)
             self.assertEqual(self.process(), {'wordlist_exhausted': 2})
             self.assertEqual(self.process(), {'skipped_wordlist_exhausted': 2})
             data['rules'][0]['expression'] = 'c'
             storage.atomic_json(catalog, data)
-            self.args.rules_info = candidates.load_rules(catalog, self.work)[1]
-            self.assertNotEqual(self.args.rules_info['sha256'], info['sha256'])
+            self.prepared = replace(self.prepared, rules_info=candidates.load_rules(catalog, self.work)[1])
+            self.assertNotEqual(self.prepared.rules_info['sha256'], info['sha256'])
             self.assertEqual(self.process(), {'wordlist_exhausted': 2})
         data['rules'][0]['expression'] = 'c\n$!'
         storage.atomic_json(catalog, data)
-        with self.assertRaises(recover.ToolError):
+        with self.assertRaises(tools.ToolError):
             candidates.load_rules(catalog, self.work)
 
     def test_capture_failure_continues_batch(self):
@@ -183,10 +187,10 @@ class BatchTests(unittest.TestCase):
         captures.mkdir()
         for name in ('a.pcap', 'b.pcap'):
             (captures / name).write_bytes(b'capture')
-        with patch.object(recover, 'preflight'), patch.object(
-                recover, 'process_capture', side_effect=[recover.ToolError('bad capture'), None]) as process:
+        with patch.object(tools, 'preflight'), patch.object(
+                workflow, 'process_capture', side_effect=[tools.ToolError('bad capture'), None]) as process:
             with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-                code = recover.main(['--handshakes', str(captures), '--wordlist', str(self.words),
+                code = cli.main(['--handshakes', str(captures), '--wordlist', str(self.words),
                                      '--output', str(self.root / 'out')])
         self.assertEqual(code, 1)
         self.assertEqual(process.call_count, 2)
@@ -209,7 +213,7 @@ class RealToolsTests(unittest.TestCase):
             words = root / 'tiny.txt'
             words.write_bytes(b'wrongpass123\ncorrectpass123\n')
             before = {p.name: storage.fingerprint(p) for p in captures.iterdir()}
-            command = [sys.executable, str(recover.ROOT / 'recover.py'), '--handshakes', str(captures),
+            command = [sys.executable, str(ROOT / 'recover.py'), '--handshakes', str(captures),
                        '--wordlist', str(words), '--output', str(root / 'out'), '--device-types', '1']
             result = subprocess.run(command, capture_output=True, text=True, timeout=300)
             self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
@@ -229,7 +233,7 @@ class RealToolsTests(unittest.TestCase):
             self.assertIn('"skipped_recovered": 2', again.stdout)
             self.assertIn('"skipped_wordlist_exhausted": 1', again.stdout)
             self.assertIn('"skipped_unusable": 1', again.stdout)
-            mutated = subprocess.run(command + ['--rules', str(recover.ROOT / 'rules/basic.json')],
+            mutated = subprocess.run(command + ['--rules', str(ROOT / 'rules/basic.json')],
                                      capture_output=True, text=True, timeout=300)
             self.assertEqual(mutated.returncode, 1, mutated.stdout + mutated.stderr)
             successes = list((output / 'complete').glob('*.json'))

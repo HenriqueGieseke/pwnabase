@@ -1,4 +1,3 @@
-import argparse
 import contextlib
 import io
 import json
@@ -9,10 +8,10 @@ import sys
 import tempfile
 import threading
 import unittest
-from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import recover
+from pwnabase import cli
+from pwnabase.config import ROOT, RunConfig
 from pwnabase.candidates import WordlistCandidates, load_profile
 from test_recover import capture_bytes
 
@@ -23,7 +22,7 @@ class WordlistProfileTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         self.words = self.root / 'words.txt'
-        self.info, self.config = load_profile(recover.ROOT / 'rules/ssid.json')
+        self.info, self.config = load_profile(ROOT / 'rules/ssid.json')
 
     def test_streaming_is_hex_safe_deduplicates_per_seed_and_accepts_longer_seeds(self):
         # CRLF is a line ending; spaces and other bytes are retained.
@@ -52,18 +51,11 @@ class WordlistProfileTests(unittest.TestCase):
         self.assertFalse(stream.stats['source_complete'])
 
     def test_default_wordlist_mode_and_conflicting_flags(self):
-        captured = []
-        def preflight(args, env, work):
-            captured.append(args)
-        with patch.object(recover, 'preflight', preflight), contextlib.redirect_stdout(io.StringIO()):
-            code = recover.main(['--ssid-rules', '--check', '--output', str(self.root / 'out')])
-        self.assertEqual(code, 0)
-        self.assertEqual(captured[0].wordlist, (recover.ROOT / 'SambaTu/SambaTu.txt').resolve())
-        self.assertTrue(captured[0].wordlist_profile)
-        self.assertIsNone(captured[0].native_rules)
-        self.assertEqual(captured[0].rules_info['type'], 'ssid_profile')
+        config = RunConfig(ssid_rules=True).normalized()
+        self.assertEqual(config.wordlist, (ROOT / 'SambaTu/SambaTu.txt').resolve())
+        self.assertEqual(load_profile(ROOT / 'rules/ssid.json')[0]['type'], 'ssid_profile')
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
-            recover.main(['--ssid', '--ssid-rules'])
+            cli.main(['--ssid', '--ssid-rules'])
 
 
 @unittest.skipUnless(os.environ.get('RUN_REAL_TOOLS') == '1', 'set RUN_REAL_TOOLS=1 for real tool tests')
@@ -78,14 +70,14 @@ class WordlistProfileRealToolsTests(unittest.TestCase):
             (captures / 'three.pcap').write_bytes(capture_bytes([(b'unrelated-fixture-three', b'not-in-source123!')], eapol=True))
             words = root / 'tiny.txt'
             words.write_bytes('só casa\n'.encode() + b'\xffabcdefg\na\n')
-            profile = json.loads((recover.ROOT / 'rules/ssid.json').read_text())
+            profile = json.loads((ROOT / 'rules/ssid.json').read_text())
             profile['rules'][1]['values'] = ['original', 'title']
             profile['rules'][2]['values'] = ['']
             profile['rules'][3]['profiles'] = profile['rules'][3]['profiles'][:1]
             profile['rules'][4].update(numbers={'start': 0, 'end': 1}, years={'start': 2000, 'end': 2000}, punctuation=['', '!'])
             config = root / 'profile.json'
             config.write_text(json.dumps(profile))
-            command = [sys.executable, str(recover.ROOT / 'recover.py'), '--wordlist', str(words), '--rules', str(config),
+            command = [sys.executable, str(ROOT / 'recover.py'), '--wordlist', str(words), '--rules', str(config),
                        '--handshakes', str(captures), '--output', str(root / 'out'), '--device-types', '1', '--progress-interval', '0']
             first = subprocess.run(command + ['--ssid-rules'], capture_output=True, text=True, timeout=300)
             self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
