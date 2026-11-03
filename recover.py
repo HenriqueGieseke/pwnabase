@@ -19,6 +19,8 @@ import subprocess
 import sys
 import tempfile
 
+from ssid_candidates import load_profile, generate as generate_ssid, source_info as ssid_source
+
 
 ROOT = Path(__file__).resolve().parent
 EXTENSIONS = {'.pcap', '.pcapng', '.cap'}
@@ -189,7 +191,7 @@ def validate_rules(args, env, work):
           f'fingerprint {args.rules_info["sha256"][:12]}', flush=True)
 
 
-def recover(record, wordlist, args, env, work, use_rules=True):
+def recover(record, wordlist, args, env, work, use_rules=True, hex_wordlist=False):
     hashes, recovered = work / 'input.22000', work / 'recovered.hex'
     hashes.write_text(record['hashcat_record'] + '\n', encoding='ascii')
     recovered.unlink(missing_ok=True)
@@ -201,6 +203,8 @@ def recover(record, wordlist, args, env, work, use_rules=True):
                '--outfile', str(recovered), str(hashes), str(wordlist)]
     if use_rules and getattr(args, 'native_rules', None):
         command.extend(['-r', str(args.native_rules)])
+    if hex_wordlist:
+        command.append('--hex-wordlist')
     code, diagnostic = run_tool(command, env, work)
     if code not in (0, 1):
         reasons = {'No devices found': 'no compatible compute devices found', 'No hashes loaded': 'no compatible authentication records loaded', 'CL_OUT_OF_RESOURCES': 'compute device ran out of resources', 'CL_MEM_OBJECT_ALLOCATION_FAILURE': 'compute memory allocation failed', 'Signature unmatched': 'authentication record signature rejected'}
@@ -307,9 +311,14 @@ def process_capture(path, args, env, work, wordlist, wordinfo, counts):
     for record_id, record in records.items():
         success = args.output / 'complete' / f'{record_id}.json'
         rules_info = getattr(args, 'rules_info', None)
-        attempt_key = wordinfo['sha256'] + ('-' + rules_info['sha256'] if rules_info else '')
-        exhausted = args.output / 'exhausted' / wordinfo['label'] / f'{record_id}-{attempt_key}.json'
+        ssid_mode = getattr(args, 'ssid', False)
+        candidate_source = ssid_source(bytes.fromhex(record['ssid_hex'])) if ssid_mode else dict(type='wordlist', **wordinfo)
+        attempt_key = (('ssid-' if ssid_mode else '') + candidate_source['sha256']
+                       + ('-' + rules_info['sha256'] if rules_info else ''))
+        label = 'ssid' if ssid_mode else wordinfo['label']
+        exhausted = args.output / 'exhausted' / label / f'{record_id}-{attempt_key}.json'
         error = args.output / 'tool-error' / f'record-{record_id}.json'
+        generation = None
         try:
             # Content identity survives renaming a wordlist or its parent folder.
             matches = sorted((args.output / 'exhausted').glob(
@@ -326,9 +335,25 @@ def process_capture(path, args, env, work, wordlist, wordinfo, counts):
                 continue
             print(f'  Attempting {record_id[:12]}: SSID={json.dumps(record["ssid"])} BSSID={record["bssid"]}', flush=True)
             attempt_started = time.monotonic()
-            password = recover(record, wordlist, args, env, work)
-            status = 'recovered' if password is not None else 'wordlist_exhausted'
+            if ssid_mode:
+                candidates, generation = generate_ssid(bytes.fromhex(record['ssid_hex']), args.ssid_config)
+                print('  SSID candidate counts: ' + json.dumps(generation, sort_keys=True), flush=True)
+                if not generation['valid_utf8']:
+                    print('  SSID is not valid UTF-8; testing exact bytes only, without text transformations.', flush=True)
+                candidate_file = work / 'ssid-candidates.hex'
+                with candidate_file.open('w', encoding='ascii') as stream:
+                    for candidate in candidates:
+                        stream.write(candidate.hex() + '\n')
+                password = recover(record, candidate_file, args, env, work, use_rules=False, hex_wordlist=True) if candidates else None
+                status = ('recovered' if password is not None else
+                          'candidates_exhausted' if candidates else 'no_eligible_candidates')
+            else:
+                password = recover(record, wordlist, args, env, work)
+                status = 'recovered' if password is not None else 'wordlist_exhausted'
             result = result_base(status, source, wordinfo, rules_info)
+            result['candidate_source'] = candidate_source
+            if generation is not None:
+                result['candidate_generation'] = generation
             result['sources'] = provenance['sources']
             result['record'] = record
             if password is not None:
@@ -343,6 +368,9 @@ def process_capture(path, args, env, work, wordlist, wordinfo, counts):
             counts[status] += 1
         except (OSError, ValueError, ToolError) as exc:
             result = result_base('tool_error', source, wordinfo, getattr(args, 'rules_info', None))
+            result['candidate_source'] = candidate_source
+            if generation is not None:
+                result['candidate_generation'] = generation
             result.update(record=record, error=str(exc))
             atomic_json(error, result)
             counts['tool_error'] += 1
@@ -352,7 +380,11 @@ def process_capture(path, args, env, work, wordlist, wordinfo, counts):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--handshakes', type=Path, default=ROOT / 'handshakes')
-    parser.add_argument('--wordlist', type=Path, default=ROOT / 'SambaTu' / 'SambaTu.txt')
+    source_group = parser.add_mutually_exclusive_group()
+    source_group.add_argument('--wordlist', type=Path)
+    source_group.add_argument('--ssid', action='store_true', help='Generate candidates from each record’s own SSID')
+    source_group.add_argument('--preview-ssid', metavar='TEXT', help='Preview supplied SSID text only; no captures or recovery')
+    parser.add_argument('--preview-limit', type=int, default=50, help='Maximum preview sample size (default 50)')
     parser.add_argument('--output', type=Path, default=ROOT,
                         help='Parent directory for outcome directories and private runtime state')
     parser.add_argument('--rules', type=Path, help='JSON mutation catalog (opt-in)')
@@ -366,13 +398,32 @@ def main(argv=None):
     args = parser.parse_args(argv)
     if args.progress_interval < 0:
         parser.error('--progress-interval must be nonnegative')
+    if args.preview_limit < 1:
+        parser.error('--preview-limit must be positive')
+    if args.preview_ssid is not None and args.check:
+        parser.error('--preview-ssid and --check cannot be combined')
+    args.ssid = args.ssid or args.preview_ssid is not None
+    if not args.ssid:
+        args.wordlist = (args.wordlist or ROOT / 'SambaTu' / 'SambaTu.txt').resolve()
     batch_started = time.monotonic()
     os.umask(0o077)
     args.output = args.output.resolve()
     args.handshakes = args.handshakes.resolve()
-    args.wordlist = args.wordlist.resolve()
     counts = Counter()
     try:
+        if args.ssid:
+            args.rules_info, args.ssid_config = load_profile((args.rules or ROOT / 'rules' / 'ssid.json').resolve())
+        if args.preview_ssid is not None:
+            seed = args.preview_ssid.encode('utf-8')
+            if not 1 <= len(seed) <= 32:
+                raise ToolError('Preview SSID must contain 1–32 UTF-8 bytes')
+            candidates, stats = generate_ssid(seed, args.ssid_config)
+            print('SSID preview counts: ' + json.dumps(stats, sort_keys=True))
+            limit = min(len(candidates), args.preview_limit)
+            print(f'Sample of {limit} eligible candidates out of {len(candidates)} (no captures read, no recovery):')
+            for index in range(limit):
+                print(json.dumps(candidates[index * len(candidates) // limit].decode('utf-8'), ensure_ascii=False))
+            return 0
         runtime = args.output / '.pwnabase'
         runtime.mkdir(parents=True, exist_ok=True, mode=0o700)
         with (runtime / 'batch.lock').open('a') as lock:
@@ -392,11 +443,15 @@ def main(argv=None):
                 env['PWNABASE_PROGRESS_INTERVAL'] = str(args.progress_interval)
                 print('PMKID and EAPOL are captured authentication verification records; wordlist exhaustion means no eligible candidate matched.', flush=True)
                 print(f'Output: {args.output}; requested OpenCL device types: {args.device_types}', flush=True)
-                args.native_rules, args.rules_info = None, None
-                if args.rules:
+                args.native_rules = None
+                if not args.ssid:
+                    args.rules_info = None
+                if args.rules and not args.ssid:
                     args.native_rules, args.rules_info = load_rules(args.rules.resolve(), work)
                 preflight(args, env, work)
-                if args.native_rules:
+                if args.ssid:
+                    print(f'SSID profile: {args.rules_info["id"]}; fingerprint {args.rules_info["sha256"][:12]}; candidate generation limit 1,000,000.', flush=True)
+                elif args.native_rules:
                     validate_rules(args, env, work)
                 else:
                     print('Rules: none; testing original wordlist entries only.', flush=True)
@@ -404,17 +459,19 @@ def main(argv=None):
                     return 0
                 if not args.handshakes.is_dir():
                     raise ToolError(f'Capture directory does not exist: {args.handshakes}')
-                wordlist = work / 'wordlist.txt'
-                shutil.copyfile(args.wordlist, wordlist)
-                if not wordlist.stat().st_size:
-                    raise ToolError('Wordlist is empty')
-                label = re.sub(r'[^A-Za-z0-9._-]', '_', args.wordlist.stem).strip('.') or 'wordlist'
-                wordinfo = {'path': str(args.wordlist), 'label': label, 'sha256': fingerprint(wordlist)}
+                wordlist, wordinfo, label = None, None, 'ssid'
+                if not args.ssid:
+                    wordlist = work / 'wordlist.txt'
+                    shutil.copyfile(args.wordlist, wordlist)
+                    if not wordlist.stat().st_size:
+                        raise ToolError('Wordlist is empty')
+                    label = re.sub(r'[^A-Za-z0-9._-]', '_', args.wordlist.stem).strip('.') or 'wordlist'
+                    wordinfo = {'path': str(args.wordlist), 'label': label, 'sha256': fingerprint(wordlist)}
                 for folder in ['complete', f'exhausted/{label}', 'no-usable-handshake', 'tool-error']:
                     (args.output / folder).mkdir(parents=True, exist_ok=True, mode=0o700)
                 captures = sorted(p for p in args.handshakes.iterdir()
                                   if p.is_file() and p.suffix.lower() in EXTENSIONS)
-                print(f'Found {len(captures)} captures; wordlist {args.wordlist.name}.', flush=True)
+                print(f'Found {len(captures)} captures; source: {"each record’s SSID" if args.ssid else args.wordlist.name}.', flush=True)
                 for index, path in enumerate(captures, 1):
                     print(f'[{index}/{len(captures)}] {path.name}', flush=True)
                     try:
@@ -428,6 +485,7 @@ def main(argv=None):
                         except OSError:
                             pass
                         result = result_base('tool_error', source, wordinfo, getattr(args, 'rules_info', None))
+                        result['candidate_source'] = dict(type='ssid', label='SSID') if args.ssid else dict(type='wordlist', **(wordinfo or {}))
                         result['error'] = str(exc)
                         atomic_json(args.output / 'tool-error' / f'path-{error_id}.json', result)
                         counts['tool_error'] += 1
@@ -437,7 +495,7 @@ def main(argv=None):
                         (args.output / 'tool-error' / f'path-{error_id}.json').unlink(missing_ok=True)
                 print(f'Batch elapsed: {time.monotonic() - batch_started:.1f}s; captures visited: {len(captures)}', flush=True)
                 print(f'Authentication records encountered: {getattr(args, "records_seen", 0)} (including duplicates across captures).', flush=True)
-                for label, key in [('Recovered records', 'recovered'), ('Exhausted records', 'wordlist_exhausted'), ('Unusable captures', 'no_usable_handshake'), ('Skipped recovered records', 'skipped_recovered'), ('Skipped exhausted records', 'skipped_wordlist_exhausted'), ('Skipped unusable captures', 'skipped_unusable'), ('Capture or record errors', 'tool_error')]:
+                for label, key in [('Recovered records', 'recovered'), ('Exhausted wordlist records', 'wordlist_exhausted'), ('Exhausted SSID records', 'candidates_exhausted'), ('No eligible candidates', 'no_eligible_candidates'), ('Unusable captures', 'no_usable_handshake'), ('Skipped recovered records', 'skipped_recovered'), ('Skipped exhausted wordlist records', 'skipped_wordlist_exhausted'), ('Skipped exhausted SSID records', 'skipped_candidates_exhausted'), ('Skipped no-eligible-candidate records', 'skipped_no_eligible_candidates'), ('Skipped unusable captures', 'skipped_unusable'), ('Capture or record errors', 'tool_error')]:
                     print(f'  {label}: {counts[key]}', flush=True)
                 print('Summary: ' + json.dumps(dict(counts), sort_keys=True), flush=True)
                 return 1 if counts['tool_error'] else 0

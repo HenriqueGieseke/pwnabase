@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "type": "ssid_profile",
+  "id": "ssid-portuguese",
+  "description": "SSID-derived phrase variants for Brazilian Portuguese studies",
+  "rules": [
+    {"id": "accents", "description": "Keep accents and also generate accent-free forms", "operation": "accents", "values": ["preserve", "strip"]},
+    {"id": "case", "description": "Unicode-aware casing; title case is applied per word before joining", "operation": "case", "values": ["original", "lower", "upper", "title", "invert_first", "lower_first_upper_rest"]},
+    {"id": "separators", "description": "Treat spaces, hyphens, dots and underscores as word boundaries", "operation": "separators", "values": [" ", "-", ".", "_", ""]},
+    {"id": "substitutions", "description": "Apply one substitution profile at a time, preserving letter case for letter replacements", "operation": "substitutions", "profiles": [
+      {"id": "unchanged", "description": "No character substitutions", "replacements": {}},
+      {"id": "numeric", "description": "Numeric lookalike substitutions", "replacements": {"a": "4", "e": "3", "i": "1", "o": "0"}},
+      {"id": "symbolic", "description": "Symbols and letter lookalikes", "replacements": {"a": "@", "e": "3", "i": "1", "o": "0", "s": "$", "u": "v"}}
+    ]},
+    {"id": "suffixes", "description": "Optional unpadded number or year, followed by optional punctuation", "operation": "suffixes", "numbers": {"start": 0, "end": 99}, "years": {"start": 2000, "end": 2026}, "punctuation": ["", "!", "@", "#", "."]}
+  ]
+}

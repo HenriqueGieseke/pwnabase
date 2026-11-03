@@ -39,6 +39,27 @@ Check shared dependencies before processing. Individual capture errors must not 
 
 ## Candidates and interruptions
 
+### SSID-derived mode
+
+Add a separate opt-in candidate-source mode using only the SSID associated with each authentication record. Preserve the default wordlist workflow. Preserve the exact SSID bytes already stored in `ssid_hex`; the display string can contain replacement characters and must not silently become the seed.
+
+Agreed transformation coverage:
+
+- Preserve the untouched SSID. Treat spaces, hyphens, underscores and dots as word boundaries for generated variants; join words using spaces, hyphens, dots, underscores or no separator.
+- For valid UTF-8 text, generate accented and accent-free forms using Unicode-aware casing. Case variants: original, lowercase, uppercase, title case, inverted first character, and lowercase first character with uppercase remainder.
+- Three substitution profiles: unchanged; numeric (`a→4`, `e→3`, `i→1`, `o→0`); symbolic (`a→@`, `e→3`, `i→1`, `o→0`, `s→$`, `u→v`). Apply substitutions case-insensitively.
+- Optional numeric suffix: none, numbers 0–99, or years 2000–2026. Follow with optional punctuation: none, `!`, `@`, `#`, or `.`. Ranges must be explicit in JSON rather than changing with the calendar.
+- Combine these families, generate distinct candidates in Python and let Hashcat test them.
+
+Agreed interface and behavior:
+
+- `python3 recover.py --ssid` uses the dedicated `rules/ssid.json` profile. `--rules` can select another SSID profile; `--ssid` and an explicitly supplied external `--wordlist` are mutually exclusive. The existing default wordlist command remains unchanged.
+- Invalid UTF-8 SSIDs retain their exact original bytes as the only candidate; skip character-based transformations and explain the limitation in logs. Use byte-safe candidate input, never the lossy display string.
+- Report generated, duplicate, rejected-length and eligible candidate counts without printing candidates during recovery. `--preview-ssid "Minha Rede"` explicitly previews caller-supplied text without reading captures or running recovery.
+- Store exhausted SSID-derived attempts in `exhausted/ssid/`. Record source type, exact source identity, profile identity and generation identity so retries cannot collide with file-wordlist attempts. Profile behavior changes permit a new attempt; descriptive metadata changes alone do not.
+- Classify zero eligible candidates as `no_eligible_candidates`, not a tool error. Retain the evidence in the SSID exhausted directory. Previously recovered records remain globally skipped.
+- Update the viewer's source labels and details to distinguish SSID-derived attempts from external wordlists, while retaining compatibility with historical results.
+
 Try wordlist entries as supplied by default. Optional `--rules` selects a versioned JSON catalog of rule objects (stable ID, description, native Hashcat expression). Compile the ordered expressions to a temporary native rule file. The basic catalog contains the eight agreed introductory transformations. Fingerprint the ordered expressions alongside wordlist contents for exhaustion identity; retain catalog metadata in results. Successful records remain globally skipped.
 
 Ctrl+C stops the batch cleanly and preserves completed results. Write results atomically. Unfinished records remain eligible for another attempt, starting from the beginning in v1.

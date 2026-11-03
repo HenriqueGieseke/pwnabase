@@ -44,6 +44,12 @@ Files without network identifiers stay separate, and hexadecimal password bytes
 are distinguished when the password cannot be displayed as text. Source files
 are never deleted or merged.
 
+The Candidate source column and exhausted-sheet filter distinguish external
+wordlists from **SSID** experiments. SSID outcomes include `candidates_exhausted`
+and `no_eligible_candidates`; both are valid completed outcomes. File details
+show generation counts when present, and the rules sheet displays SSID profile
+stages and their configuration alongside ordinary native rule catalogs.
+
 The active sheet refreshes every five seconds. Metadata is checked sequentially,
 and unchanged JSON contents are reused from memory. Updates preserve filters,
 sort, page, selected file and scroll, clamping the page if files disappear. Files

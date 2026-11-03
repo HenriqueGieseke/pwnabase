@@ -88,6 +88,86 @@ The real-tool integration test generates synthetic wireless packets, extracts PM
 
 The agreed scope is recorded in [DESIGN.md](DESIGN.md), with domain terms in [GLOSSARY.md](GLOSSARY.md). Wardriving imports and a database are deferred.
 
+## SSID-derived experiments
+
+Use each authentication record's own network name as the candidate source:
+
+```bash
+python3 recover.py --ssid
+```
+
+This is a separate experiment. It does not read SambaTu or other external
+wordlists, and `--ssid` cannot be combined with `--wordlist`. Previously
+recovered records remain skipped. Wait for another batch using the same output
+directory to finish, or stop it cleanly before starting this mode.
+
+The default [SSID profile](rules/ssid.json) combines:
+
+- Original and accent-free text.
+- Original, lowercase, uppercase, per-word title case, inverted-first-character,
+  and lowercase-first/uppercase-rest casing.
+- Word joining with spaces, hyphens, dots, underscores or no separator. Spaces,
+  hyphens, dots and underscores in the SSID are treated as word boundaries.
+- Unchanged text; numeric substitutions (`a→4`, `e→3`, `i→1`, `o→0`); or symbolic
+  substitutions (`a→@`, `e→3`, `i→1`, `o→0`, `s→$`, `u→v`). A profile applies its
+  replacements together; it does not enumerate every individual replacement
+  subset. Letter-to-letter replacements retain uppercase when appropriate.
+- No number, unpadded numbers 0–99, or years 2000–2026, followed by no punctuation,
+  `!`, `@`, `#`, or `.`. These ranges are explicit and do not change with the date.
+
+The untouched SSID bytes are also included. Python generates and deduplicates
+candidates, then Hashcat tests candidates of **8–63 bytes**, not characters.
+Short seeds are expanded before length rejection. Candidates are transferred
+through a temporary hex-encoded wordlist, preserving arbitrary bytes, including
+line separators. Invalid UTF-8 SSIDs receive no character transformations: only
+their exact original bytes are tested, with an explanatory message. The lossy
+SSID display text is never used as the seed.
+
+Preview fictional text before running an experiment:
+
+```bash
+python3 recover.py --preview-ssid "Minha Rede"
+python3 recover.py --preview-ssid "Minha Rede" --preview-limit 12
+python3 recover.py --ssid --rules rules/ssid.json
+python3 recover.py --ssid --check
+```
+
+Preview prints candidate counts and a deterministic sample of eligible
+candidates (50 by default), spread across the generated list. It reads only
+the profile and supplied text; it does not read captures, acquire the batch lock,
+write recovery state, or invoke Hashcat. Actual recovery logs counts without
+printing the candidate list. `--check` verifies the ordinary known-password
+backend self-test independently of the selected SSID profile.
+
+An SSID profile uses `schema_version: 1` and `type: "ssid_profile"`. Its `rules`
+array contains five stage objects, each with an `id`, `description`, and
+`operation`. Supported operations are `accents`, `case`, `separators`,
+`substitutions`, and `suffixes`, with configuration as shown in `rules/ssid.json`.
+These are Python generation stages, not native Hashcat expressions. Native
+catalogs such as `rules/basic.json` remain available for external wordlists.
+Unsupported or oversized profiles are rejected before processing; the upper
+bound is 1,000,000 generated combinations per record. The default upper bound is
+115,201 combinations before deduplication, including the untouched seed.
+
+New result metadata includes `candidate_source` (type, exact SSID bytes and
+fingerprint), `rules` (profile and generation identity), and `candidate_generation`
+(generated, duplicate, rejected-length and eligible counts). New file-wordlist
+results also identify their source type; older results remain readable.
+
+SSID exhaustion is stored in `exhausted/ssid/`, with status
+`candidates_exhausted`. Zero eligible candidates are recorded there as
+`no_eligible_candidates`, a valid outcome rather than a tool error. Retry
+identity includes the exact seed bytes, behavioral profile fingerprint,
+generator version and Python Unicode database version. Editing descriptions or
+IDs alone does not trigger retries; changing configuration or generation
+behavior does. Changes to generator semantics must increment its version.
+Existing external-wordlist exhaustion filenames and behavior remain compatible.
+
+The viewer labels this source **SSID**, exposes its outcome and generation
+counts, and displays profile stages in the rules details. Empty wordlist metadata
+for SSID attempts is intentional. These experiments are not claimed to reproduce
+every transformation from the upstream PT-BR project's chained rule files.
+
 ## Terminal progress
 
 Normal output explains extraction, PMKID/EAPOL counts, record identities, results,

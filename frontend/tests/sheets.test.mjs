@@ -105,3 +105,21 @@ test('duplicate filter uses the complete network/password tuple before paginatio
   assert.equal((await store.sheet('complete', { hideDuplicates: true, search: 'Other' })).filtered, 2)
   assert.equal((await store.sheet('complete')).filtered, 59)
 })
+
+test('SSID-derived results expose a source label and preserve generation details', async t => {
+  const { store, put } = await fixture(t)
+  await put('exhausted/ssid/attempt.json', {
+    status: 'no_eligible_candidates', wordlist: null,
+    candidate_source: { type: 'ssid', label: 'SSID', ssid_hex: '616263' },
+    candidate_generation: { eligible: 0 }, rules: { id: 'ssid-portuguese' },
+    record: { ssid: 'abc', bssid: '02:00:00:00:00:01' },
+  })
+  const sheet = await store.sheet('exhausted', { wordlist: 'SSID' })
+  assert.equal(sheet.filtered, 1)
+  assert.equal(sheet.rows[0].wordlist, 'SSID')
+  assert.equal(sheet.rows[0].candidateSource, 'ssid')
+  assert.equal(sheet.rows[0].status, 'no_eligible_candidates')
+  assert.equal((await store.detail('exhausted', sheet.rows[0].id)).data.candidate_generation.eligible, 0)
+  await put('rules/ssid.json', { id: 'ssid-portuguese', type: 'ssid_profile', rules: [{ id: 'case', operation: 'case', values: ['upper'] }] })
+  assert.equal((await store.sheet('rules')).rows[0].ruleCount, 1)
+})
