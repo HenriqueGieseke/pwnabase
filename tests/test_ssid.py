@@ -13,6 +13,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import recover
+from pwnabase import tools
 import ssid_candidates as ssid
 from test_recover import capture_bytes
 
@@ -82,7 +83,7 @@ class SSIDTests(unittest.TestCase):
 
     def test_preview_never_reads_captures_or_runs_tools(self):
         output = io.StringIO()
-        with patch.object(recover, 'run_tool') as tool, patch.object(recover, 'process_capture') as process:
+        with patch.object(tools, 'run_tool') as tool, patch.object(recover, 'process_capture') as process:
             with contextlib.redirect_stdout(output):
                 code = recover.main(['--preview-ssid', 'Minha Rede', '--preview-limit', '4',
                                      '--output', str(self.root / 'must-not-exist')])
@@ -103,7 +104,7 @@ class SSIDTests(unittest.TestCase):
             Path(command[2]).write_text(recover.synthetic_record(ssid=seed) + '\n')
             return 0, ''
         counts = Counter()
-        with patch.object(recover, 'run_tool', side_effect=extract), contextlib.redirect_stdout(io.StringIO()):
+        with patch.object(tools, 'run_tool', side_effect=extract), contextlib.redirect_stdout(io.StringIO()):
             recover.process_capture(capture, args, {}, self.root, words, None, counts)
         return counts
 

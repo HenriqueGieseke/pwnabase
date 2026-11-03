@@ -77,6 +77,28 @@ Ctrl+C stops the batch cleanly and preserves completed results. Write results at
 
 Skip unchanged captures previously classified as having no usable handshake. Provide `--retry-unusable` to request another extraction attempt; changed captures are automatically eligible.
 
+## Modular refactor: agreed direction (planning)
+
+Refactor the Python recovery workflow incrementally for maintainability and future imports. Preserve existing commands, defaults, result formats and filenames, skip/retry decisions, and interruption behavior. Keep one local application with Python modules behind `python3 recover.py`.
+
+Database migration, wardriving imports, frontend job controls, and parallel recovery remain separate features. The longer-term product is an application accepting Pwnagotchi and wardriving uploads with a shared collection of observations and recovery results. The Dell OptiPlex will hold the central database, the current desktop will perform heavy recovery work, and the notebook will serve as a smaller mobile lab. Recovery workers should eventually be independent of the machine used to upload or browse. Network protocols, offline synchronization, database technology, and scheduling remain undecided and outside this refactor.
+
+Follow the agreed workflow: grill-with-docs, to-spec, to-tickets, implement one ticket at a time, code-review, then retro. Begin implementation with tool execution. Use codebase-design throughout; clear context between completed implementation tickets once their outcomes are recorded. Do not commit or push implementation changes before user approval.
+
+The user confirmed that the recovery batch has stopped; an isolated checkout is not required solely to protect that batch. Continue using synthetic fixtures for development and preserve existing local data.
+
+### Module responsibilities and compatibility
+
+Introduce a `pwnabase/` Python package, retaining `recover.py` as the small entry point for the existing command. Group responsibilities into CLI (options and startup), workflow (captures, attempts, skips and failure handling), tools (subprocess execution, extraction and recovery), candidates (wordlists, profiles and streaming), and storage (result files, provenance and saved attempt history). These responsibilities do not require one file or one class each; keep interfaces small and place complexity behind them.
+
+Use explicit configuration and attempt results instead of attaching runtime state to CLI arguments. The workflow must be callable without constructing command-line arguments. Storage owns paths, atomic writes and lookups; the workflow owns decisions to skip, retry or recover. Retain file storage in this refactor without implementing a database adapter or network worker protocol.
+
+Compatibility covers the CLI and stored results, including the existing viewer's ability to read them. Internal Python functions and tests may move without preserving old imports through forwarding wrappers. Preserve default GPU selection, candidate behavior and byte handling, attempt identities, locks, completed-result retention, failure isolation, cancellation behavior, private file handling and informative logs. Avoid extra per-candidate logging or processing overhead.
+
+Use existing tests and focused additional checks for risky behavior such as cancellation, candidate stream failures and retry identity. Use synthetic data and real-tool checks at relevant milestones; do not launch recovery against existing local captures as part of verification. Document discovered pre-existing bugs separately and defer fixes unless they block safe progress; surface any necessary behavior change explicitly.
+
+Offline notebook operation and synchronization remain future design questions. The modular workflow must not assume that the notebook always has connectivity to the Dell.
+
 ## Development prerequisite
 
 Install and verify Hashcat locally before starting implementation, so development and testing can use the real tool. Install hcxpcapngtool for capture extraction as well. Synthetic-only validation is insufficient for the requested development workflow.

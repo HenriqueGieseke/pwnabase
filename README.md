@@ -86,6 +86,16 @@ RUN_REAL_TOOLS=1 python3 -m unittest discover -s tests -v
 
 The real-tool integration test generates synthetic wireless packets, extracts PMKID and EAPOL records, recovers known passwords, exhausts a tiny wordlist, handles corrupt and empty captures, and verifies rerun skips. It uses a temporary directory and does not access `handshakes/`.
 
+Tool process execution lives in `pwnabase.tools`: subprocess groups, cancellation,
+timeouts, candidate stdin feeding, and filtered progress reporting share one
+interface. `recover.py` still owns the batch workflow and tool-specific commands
+during the incremental refactor. Run the focused harmless-process checks with
+`python3 -m unittest discover -s tests -p test_tools.py -v`. Returned diagnostic
+text can contain candidates; callers must filter it before logging and must not
+save it in results. The returned diagnostic tail and in-memory parsing are
+bounded; the temporary output spool can grow on disk. This existing limitation
+is retained by the behavior-preserving extraction.
+
 The agreed scope is recorded in [DESIGN.md](DESIGN.md), with domain terms in [GLOSSARY.md](GLOSSARY.md). Wardriving imports and a database are deferred.
 
 ## SSID-derived experiments

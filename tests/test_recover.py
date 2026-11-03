@@ -15,6 +15,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import recover
+from pwnabase import tools
 
 
 def capture_bytes(networks=(), eapol=False):
@@ -88,7 +89,7 @@ class BatchTests(unittest.TestCase):
 
     def test_mixed_outcomes_skip_and_changed_wordlist(self):
         before = recover.fingerprint(self.capture)
-        with patch.object(recover, 'run_tool', side_effect=self.extract), patch.object(
+        with patch.object(tools, 'run_tool', side_effect=self.extract), patch.object(
                 recover, 'recover', side_effect=[b'testpass123', None]) as crack:
             self.assertEqual(self.process(), {'recovered': 1, 'wordlist_exhausted': 1})
             self.assertEqual(crack.call_count, 2)
@@ -97,7 +98,7 @@ class BatchTests(unittest.TestCase):
         self.assertEqual(len(successes), 1)
         self.assertEqual(recover.read_json(successes[0])['password'], 'testpass123')
         self.assertEqual(successes[0].stat().st_mode & 0o777, 0o600)
-        with patch.object(recover, 'run_tool', side_effect=self.extract), patch.object(recover, 'recover') as crack:
+        with patch.object(tools, 'run_tool', side_effect=self.extract), patch.object(recover, 'recover') as crack:
             self.assertEqual(self.process(), {'skipped_recovered': 1, 'skipped_wordlist_exhausted': 1})
             crack.assert_not_called()
             self.info['label'] = 'renamed'
@@ -105,23 +106,23 @@ class BatchTests(unittest.TestCase):
             crack.assert_not_called()
         self.words.write_bytes(b'changedpass\n')
         self.info['sha256'] = recover.fingerprint(self.words)
-        with patch.object(recover, 'run_tool', side_effect=self.extract), patch.object(
+        with patch.object(tools, 'run_tool', side_effect=self.extract), patch.object(
                 recover, 'recover', return_value=b'different123') as crack:
             self.assertEqual(self.process(), {'skipped_recovered': 1, 'recovered': 1})
             self.assertEqual(crack.call_count, 1)
 
     def test_record_error_does_not_stop_next_record_and_is_retried(self):
-        with patch.object(recover, 'run_tool', side_effect=self.extract), patch.object(
+        with patch.object(tools, 'run_tool', side_effect=self.extract), patch.object(
                 recover, 'recover', side_effect=[recover.ToolError('fixture error'), None]):
             self.assertEqual(self.process(), {'tool_error': 1, 'wordlist_exhausted': 1})
-        with patch.object(recover, 'run_tool', side_effect=self.extract), patch.object(
+        with patch.object(tools, 'run_tool', side_effect=self.extract), patch.object(
                 recover, 'recover', return_value=b'testpass123') as crack:
             self.assertEqual(self.process(), {'recovered': 1, 'skipped_wordlist_exhausted': 1})
             self.assertEqual(crack.call_count, 1)
         self.assertEqual(list((self.root / 'tool-error').glob('*.json')), [])
 
     def test_unusable_skip_retry_and_changed_capture(self):
-        with patch.object(recover, 'run_tool', return_value=(0, '')) as extract:
+        with patch.object(tools, 'run_tool', return_value=(0, '')) as extract:
             self.assertEqual(self.process(), {'no_usable_handshake': 1})
             self.assertEqual(self.process(), {'skipped_unusable': 1})
             self.assertEqual(extract.call_count, 1)
@@ -133,7 +134,7 @@ class BatchTests(unittest.TestCase):
             self.assertEqual(extract.call_count, 3)
 
     def test_duplicate_capture_retains_both_source_paths(self):
-        with patch.object(recover, 'run_tool', side_effect=self.extract), patch.object(
+        with patch.object(tools, 'run_tool', side_effect=self.extract), patch.object(
                 recover, 'recover', return_value=b'testpass123'):
             self.process()
             duplicate = self.root / 'duplicate.pcap'
@@ -152,44 +153,6 @@ class BatchTests(unittest.TestCase):
         self.assertEqual(recover.read_json(path), {'status': 'old'})
         self.assertEqual(list(self.root.glob('.pending-*')), [])
 
-    def test_interrupt_terminates_child(self):
-        marker = self.root / 'child.pid'
-        command = [sys.executable, '-c',
-                   'import os,time,pathlib; pathlib.Path(' + repr(str(marker))
-                   + ').write_text(str(os.getpid())); time.sleep(30)']
-        original_wait = subprocess.Popen.wait
-        children = []
-
-        def interrupted_wait(process, *args, **kwargs):
-            if not children:
-                children.append(process)
-                raise KeyboardInterrupt()
-            return original_wait(process, *args, **kwargs)
-
-        with patch.object(subprocess.Popen, 'wait', interrupted_wait):
-            with self.assertRaises(KeyboardInterrupt):
-                recover.run_tool(command, os.environ.copy(), self.work)
-        self.assertIsNotNone(children[0].poll())
-
-    def test_progress_filters_candidates_and_handles_malformed_lines(self):
-        command = [sys.executable, '-c',
-                   'import time; print("malformed", flush=True); '
-                   'print(\'{"progress":[1,10],"devices":[{"speed":3}],"candidate":"SECRET"}\', flush=True); '
-                   'time.sleep(.15)', '-m']
-        env = os.environ.copy()
-        env['PWNABASE_PROGRESS_INTERVAL'] = '0.03'
-        output = io.StringIO()
-        with contextlib.redirect_stdout(output):
-            code, _ = recover.run_tool(command, env, self.work)
-        self.assertEqual(code, 0)
-        self.assertIn('Progress 1/10', output.getvalue())
-        self.assertNotIn('SECRET', output.getvalue())
-        env['PWNABASE_PROGRESS_INTERVAL'] = '0'
-        output = io.StringIO()
-        with contextlib.redirect_stdout(output):
-            recover.run_tool(command, env, self.work)
-        self.assertEqual(output.getvalue(), '')
-
     def test_rule_identity_and_exhaustion_are_independent(self):
         catalog = self.root / 'rules.json'
         catalog.write_text((recover.ROOT / 'rules/basic.json').read_text())
@@ -199,7 +162,7 @@ class BatchTests(unittest.TestCase):
         data['description'] = 'Changed explanation'
         recover.atomic_json(catalog, data)
         self.assertEqual(recover.load_rules(catalog, self.work)[1]['sha256'], info['sha256'])
-        with patch.object(recover, 'run_tool', side_effect=self.extract), patch.object(recover, 'recover', return_value=None):
+        with patch.object(tools, 'run_tool', side_effect=self.extract), patch.object(recover, 'recover', return_value=None):
             self.process()
             self.args.rules_info = info
             self.assertEqual(self.process(), {'wordlist_exhausted': 2})

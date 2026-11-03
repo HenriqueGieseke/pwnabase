@@ -12,12 +12,13 @@ import os
 from pathlib import Path
 import re
 import shutil
-import signal
-import threading
 import time
 import subprocess
 import sys
 import tempfile
+
+from pwnabase import tools
+from pwnabase.tools import ToolError
 
 from ssid_candidates import (load_profile, generate as generate_ssid,
                              source_info as ssid_source, WordlistCandidates, WORDLIST_GENERATOR)
@@ -25,10 +26,6 @@ from ssid_candidates import (load_profile, generate as generate_ssid,
 
 ROOT = Path(__file__).resolve().parent
 EXTENSIONS = {'.pcap', '.pcapng', '.cap'}
-
-
-class ToolError(Exception):
-    pass
 
 
 def fingerprint(path):
@@ -55,95 +52,6 @@ def atomic_json(path, value):
 
 def read_json(path):
     return json.loads(path.read_text(encoding='utf-8')) if path.exists() else None
-
-
-def run_tool(command, env, cwd, timeout=None, stdin_source=None):
-    # A separate process group lets Ctrl+C stop the tool and any workers.
-    with tempfile.TemporaryFile() as output:
-        process = subprocess.Popen(command, stdin=subprocess.PIPE if stdin_source else subprocess.DEVNULL, stdout=output,
-                                   stderr=subprocess.STDOUT, env=env, cwd=cwd,
-                                   start_new_session=True)
-        stop = threading.Event()
-        feed_errors = []
-        def feed():
-            try:
-                for chunk in stdin_source(stop):
-                    if stop.is_set():
-                        break
-                    process.stdin.write(chunk)
-            except BrokenPipeError:
-                pass  # Expected when Hashcat recovers a password before EOF.
-            except Exception as error:
-                feed_errors.append(error)
-            finally:
-                try:
-                    process.stdin.close()
-                except BrokenPipeError:
-                    pass
-        interval = float(env.get('PWNABASE_PROGRESS_INTERVAL', '0'))
-        def progress():
-            position = 0
-            pending = ""
-            while not stop.wait(interval):
-                raw = os.pread(output.fileno(), 65536, position)
-                position += len(raw)
-                latest = None
-                pending += raw.decode('utf-8', errors='replace')
-                lines = pending.split('\n')
-                pending = lines.pop()[-65536:]
-                for line in lines:
-                    try:
-                        value = json.loads(line)
-                        if isinstance(value, dict) and isinstance(value.get('progress'), list) and len(value['progress']) == 2 and all(isinstance(n, (int, float)) for n in value['progress']):
-                            latest = value
-                    except (ValueError, TypeError):
-                        pass
-                if latest:
-                    done, total = latest.get('progress', [0, 0])[:2]
-                    devices = latest.get('devices')
-                    devices = devices if isinstance(devices, list) else []
-                    speed = sum(d.get('speed', 0) for d in devices if isinstance(d, dict) and isinstance(d.get('speed', 0), (int, float)))
-                    remaining = (total - done) / speed if speed and total >= done and total > 0 and not stdin_source else None
-                    rejected = latest.get('rejected')
-                    rejected = rejected if isinstance(rejected, (int, float)) else 'unavailable'
-                    eta = f'{remaining:.0f}s' if remaining is not None else 'unavailable'
-                    print(f'  Progress {done}/{total}; {speed:.0f} H/s; '
-                          f'rejected={rejected}; elapsed={time.monotonic() - started:.0f}s; estimated remaining={eta}', flush=True)
-                else:
-                    print('  Hashcat running; waiting for its next progress report (startup may compile kernels).', flush=True)
-                if stdin_source:
-                    print(f'  Wordlist generation: {stdin_source.stats["seeds"]} seeds; '
-                          f'{stdin_source.stats["eligible"]} eligible candidates generated (per-seed deduplication).', flush=True)
-        started = time.monotonic()
-        worker = None
-        if interval > 0 and '-m' in command:
-            worker = threading.Thread(target=progress, daemon=True)
-            worker.start()
-        feeder = None
-        if stdin_source:
-            feeder = threading.Thread(target=feed, daemon=True)
-            feeder.start()
-        try:
-            code = process.wait(timeout=timeout)
-        except (KeyboardInterrupt, subprocess.TimeoutExpired):
-            os.killpg(process.pid, signal.SIGTERM)
-            try:
-                process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                os.killpg(process.pid, signal.SIGKILL)
-                process.wait()
-            raise
-        finally:
-            stop.set()
-            if worker:
-                worker.join()
-            if feeder:
-                feeder.join()
-        if feed_errors:
-            raise ToolError(f'Candidate generation failed: {type(feed_errors[0]).__name__}')
-        output.seek(max(0, output.seek(0, 2) - 65536))
-        # Never persist tool output: it can include password candidates.
-        return code, output.read().decode('utf-8', errors='replace')
 
 
 def parse_record(line):
@@ -210,7 +118,7 @@ def load_rules(path, work):
 def validate_rules(args, env, work):
     probe = work / 'rule-validation.txt'
     probe.write_text('example123\n', encoding='ascii')
-    code, diagnostic = run_tool([args.hashcat, '--stdout', '--quiet',
+    code, diagnostic = tools.run_tool([args.hashcat, '--stdout', '--quiet',
                                  '--wordlist-autohex-disable', '-r', str(args.native_rules), str(probe)],
                                 env, work, timeout=30)
     if code or re.search(r'invalid[^\n]*rule|unsupported rule|no valid rules|cannot convert', diagnostic, re.IGNORECASE):
@@ -238,9 +146,9 @@ def recover(record, wordlist, args, env, work, use_rules=True, hex_wordlist=Fals
     if candidate_stream is not None:
         command.append('--stdin-timeout-abort=0')
     if candidate_stream is None:
-        code, diagnostic = run_tool(command, env, work)
+        code, diagnostic = tools.run_tool(command, env, work)
     else:
-        code, diagnostic = run_tool(command, env, work, stdin_source=candidate_stream)
+        code, diagnostic = tools.run_tool(command, env, work, stdin_source=candidate_stream)
     if code not in (0, 1):
         reasons = {'No devices found': 'no compatible compute devices found', 'No hashes loaded': 'no compatible authentication records loaded', 'CL_OUT_OF_RESOURCES': 'compute device ran out of resources', 'CL_MEM_OBJECT_ALLOCATION_FAILURE': 'compute memory allocation failed', 'Signature unmatched': 'authentication record signature rejected'}
         reason = next((message for marker, message in reasons.items() if marker in diagnostic), 'tool failed without a recognized diagnostic')
@@ -269,11 +177,11 @@ def preflight(args, env, work):
             raise ToolError(f'Missing {getattr(args, name)}; install hashcat and hcxtools')
         setattr(args, name, str(Path(binary).resolve()))
     for binary in (args.hashcat, args.extractor):
-        code, _ = run_tool([binary, '--version'], env, work, timeout=30)
+        code, _ = tools.run_tool([binary, '--version'], env, work, timeout=30)
         print(f'{Path(binary).name}: {_.strip()}', flush=True)
         if code:
             raise ToolError(f'{Path(binary).name} version check failed (exit {code})')
-    code, backend = run_tool([args.hashcat, '-I'], env, work, timeout=30)
+    code, backend = tools.run_tool([args.hashcat, '-I'], env, work, timeout=30)
     if code:
         raise ToolError(f'Compute device enumeration failed (exit {code})')
     for line in backend.splitlines():
@@ -322,7 +230,7 @@ def process_capture(path, args, env, work, wordlist, wordinfo, counts):
     print('  Extracting authentication records...', flush=True)
     extracted = work / 'extracted.22000'
     extracted.unlink(missing_ok=True)
-    code, diagnostic = run_tool([args.extractor, '-o', str(extracted), str(snapshot)],
+    code, diagnostic = tools.run_tool([args.extractor, '-o', str(extracted), str(snapshot)],
                                 env, work)
     # Some converter failures are reported in output despite a zero exit status.
     if code or re.search(r'failed to|read error|invalid (?:pcap|capture)|unsupported (?:pcap|link)',

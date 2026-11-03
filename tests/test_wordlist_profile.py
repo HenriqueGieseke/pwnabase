@@ -51,28 +51,6 @@ class WordlistProfileTests(unittest.TestCase):
         self.assertEqual(stream.stats['seeds'], 1)
         self.assertFalse(stream.stats['source_complete'])
 
-    def test_broken_pipe_when_consumer_finishes_early_does_not_hang(self):
-        class Source:
-            stats = {'seeds': 0, 'eligible': 0}
-            def __call__(self, stop):
-                for _ in range(10000):
-                    if stop.is_set():
-                        return
-                    yield b'61\n' * 22000
-        command = [sys.executable, '-c', 'import sys; sys.stdin.buffer.read(1)']
-        code, _ = recover.run_tool(command, os.environ.copy(), self.root, timeout=5, stdin_source=Source())
-        self.assertEqual(code, 0)
-
-    def test_producer_error_is_reported_and_not_exhaustion(self):
-        class Source:
-            stats = {'seeds': 0, 'eligible': 0}
-            def __call__(self, stop):
-                yield b'61\n'
-                raise OSError('fixture source error')
-        command = [sys.executable, '-c', 'import sys; sys.stdin.buffer.read()']
-        with self.assertRaisesRegex(recover.ToolError, 'Candidate generation failed'):
-            recover.run_tool(command, os.environ.copy(), self.root, timeout=5, stdin_source=Source())
-
     def test_default_wordlist_mode_and_conflicting_flags(self):
         captured = []
         def preflight(args, env, work):
