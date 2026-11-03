@@ -43,4 +43,31 @@ manifest, while the selected executable can remain outside the snapshot.
 Resolve unmerged entries and fully stage or remove intent-to-add entries first.
 Tracked symlinks/submodules are unsupported and fail explicitly rather than
 following links outside the snapshot. All snapshots/caches are removed after
-success, failure or interruption. Hook activation follows in ticket 10.
+success, failure or interruption.
+
+## Enable the commit guardrail
+
+Run `./scripts/install-hooks` once per checkout. It enables the tracked
+`.githooks/pre-commit` through local Git configuration. Repeat installation is
+safe. Different hook configurations, including empty explicit settings, and
+existing active default hooks are preserved and reported as conflicts. Linked
+worktree installation is refused rather than changing shared configuration.
+
+Inspect activation with `git config --show-origin --get core.hooksPath`; the
+project value is `.githooks`. The installer requires the hook and runner to be
+tracked executable files. It never downloads dependencies or replaces other
+hook scripts.
+
+The hook loads the runner from the index and always selects staged, ordinary
+checks. Every commit, including documentation-only commits, runs the fast suite.
+An unstaged edit to the runner cannot substitute its code for the staged runner.
+Failing or interrupted checks abort the commit without changing the staged
+content. Ordinary hooks never enable the real-tool integrations.
+
+Cancellation is handled when the runner/hook receives the signal, as with normal
+terminal Ctrl+C delivered to Git's foreground process group. Signalling only the
+Git parent PID is not guaranteed by Git to forward cancellation to its hook.
+
+Git's standard hook bypass mechanisms remain available; local hooks prevent
+accidental mistakes, not deliberate bypass. No custom bypass flag, remote CI,
+branch protection or pull-request requirement is introduced.

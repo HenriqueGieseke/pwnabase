@@ -14,7 +14,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 
 
-class CheckRunnerTests(unittest.TestCase):
+class CheckFixture:
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix='pwnabase-check-test-')
         self.addCleanup(self.temp.cleanup)
@@ -63,6 +63,8 @@ writeFileSync(process.env.FRONTEND_MARKER, 'passed');
         return subprocess.run([str(self.runner), *args], cwd=self.root, env=env or self.env,
                               capture_output=True, text=True, timeout=30)
 
+
+class CheckRunnerTests(CheckFixture, unittest.TestCase):
     def test_working_checks_succeed_and_disable_inherited_real_tests(self):
         before = (self.root / '.git/index').read_bytes()
         result = self.check()
@@ -278,3 +280,123 @@ writeFileSync(process.env.FRONTEND_MARKER, 'passed');
         self.assertEqual((self.root / '.git/index').read_bytes(), before)
         self.assertFalse(self.frontend_marker.exists())
         self.assertEqual(list(self.scratch.iterdir()), [])
+
+class HookTests(CheckFixture, unittest.TestCase):
+    def setUp(self):
+        super().setUp()
+        self.installer = self.root / 'scripts/install-hooks'
+        shutil.copy2(ROOT / 'scripts/install-hooks', self.installer)
+        (self.root / '.githooks').mkdir()
+        shutil.copy2(ROOT / '.githooks/pre-commit', self.root / '.githooks/pre-commit')
+        self.git('add', 'scripts/install-hooks', '.githooks/pre-commit')
+        self.git('commit', '-qm', 'fixture hook sources')
+
+    def install(self):
+        return subprocess.run([str(self.installer)], cwd=self.root, env=self.env,
+                              capture_output=True, text=True, timeout=10)
+
+    def test_installation_is_explicit_and_repeatable(self):
+        installed = self.install()
+        self.assertEqual(installed.returncode, 0, installed.stdout + installed.stderr)
+        self.assertEqual(self.git('config', '--local', '--get', 'core.hooksPath').strip(), '.githooks')
+        before = (self.root / '.git/config').read_bytes()
+        repeated = self.install()
+        self.assertEqual(repeated.returncode, 0, repeated.stdout + repeated.stderr)
+        self.assertEqual((self.root / '.git/config').read_bytes(), before)
+
+    def test_installer_preserves_conflicting_configuration_and_active_hooks(self):
+        active = self.root / '.git/hooks/pre-commit'
+        active.write_text('#!/bin/sh\nexit 0\n')
+        active.chmod(0o700)
+        before = (self.root / '.git/config').read_bytes()
+        result = self.install()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('Existing active hook', result.stderr)
+        self.assertEqual((self.root / '.git/config').read_bytes(), before)
+        self.assertEqual(active.read_text(), '#!/bin/sh\nexit 0\n')
+        active.unlink()
+        for configured in ['other-hooks', '']:
+            with self.subTest(configured=configured):
+                self.git('config', '--local', 'core.hooksPath', configured)
+                before = (self.root / '.git/config').read_bytes()
+                result = self.install()
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('Conflicting core.hooksPath', result.stderr)
+                self.assertEqual((self.root / '.git/config').read_bytes(), before)
+
+    def test_actual_commit_checks_index_and_preserves_unstaged_work(self):
+        self.assertEqual(self.install().returncode, 0)
+        original = self.test_file.read_text()
+        self.test_file.write_text('import unittest\nclass Bad(unittest.TestCase):\n    def test_bad(self): self.fail("staged failure")\n')
+        self.git('add', 'tests/test_fixture.py')
+        self.test_file.write_text(original)
+        previous = self.git('rev-parse', 'HEAD')
+        staged = self.git('ls-files', '--stage')
+        commit = subprocess.run(['git', '-C', str(self.root), 'commit', '-qm', 'must fail'],
+                                env=self.env, capture_output=True, text=True, timeout=30)
+        self.assertNotEqual(commit.returncode, 0)
+        self.assertIn('staged failure', commit.stderr)
+        self.assertEqual(self.git('rev-parse', 'HEAD'), previous)
+        self.assertEqual(self.git('ls-files', '--stage'), staged)
+        self.assertEqual(self.test_file.read_text(), original)
+        self.git('add', 'tests/test_fixture.py')
+        # Broken unstaged source, including the runner itself, cannot replace the
+        # staged content or stop a valid staged commit from being checked.
+        self.test_file.write_text('invalid unstaged syntax !\n')
+        self.runner.write_text('invalid unstaged runner !\n')
+        commit = subprocess.run(['git', '-C', str(self.root), 'commit', '--allow-empty', '-qm', 'valid staged tree'],
+                                env=self.env, capture_output=True, text=True, timeout=30)
+        self.assertEqual(commit.returncode, 0, commit.stdout + commit.stderr)
+        self.assertNotEqual(self.git('rev-parse', 'HEAD'), previous)
+        self.assertEqual(self.test_file.read_text(), 'invalid unstaged syntax !\n')
+        self.assertEqual(self.runner.read_text(), 'invalid unstaged runner !\n')
+        self.assertTrue(self.frontend_marker.exists())
+        self.assertEqual(list(self.scratch.iterdir()), [])
+
+    def test_documentation_commit_still_runs_all_fast_checks(self):
+        self.assertEqual(self.install().returncode, 0)
+        (self.root / 'notes.md').write_text('Synthetic notes.\n')
+        self.git('add', 'notes.md')
+        commit = subprocess.run(['git', '-C', str(self.root), 'commit', '-qm', 'documentation fixture'],
+                                env=self.env, capture_output=True, text=True, timeout=30)
+        self.assertEqual(commit.returncode, 0, commit.stdout + commit.stderr)
+        self.assertTrue(self.python_marker.exists())
+        self.assertTrue(self.frontend_marker.exists())
+
+    def test_interrupted_commit_does_not_create_commit_or_leave_checks_running(self):
+        self.assertEqual(self.install().returncode, 0)
+        marker = Path(self.temp.name) / 'commit-check.pid'
+        self.test_file.write_text('import os, pathlib, time, unittest\nclass Slow(unittest.TestCase):\n'
+                                 '    def test_slow(self):\n'
+                                 + f'        pathlib.Path({str(marker)!r}).write_text(str(os.getpid()))\n'
+                                 '        time.sleep(30)\n')
+        self.git('add', 'tests/test_fixture.py')
+        previous = self.git('rev-parse', 'HEAD')
+        process = subprocess.Popen(['git', '-C', str(self.root), 'commit', '-qm', 'interrupted fixture'],
+                                   env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                   start_new_session=True)
+        try:
+            deadline = time.monotonic() + 10
+            while not marker.exists() and process.poll() is None and time.monotonic() < deadline:
+                time.sleep(.02)
+            self.assertTrue(marker.exists(), 'commit check did not start')
+            # Ctrl+C is delivered to the terminal foreground group (Git and
+            # its hook), rather than to Git alone, which may not forward it.
+            os.killpg(process.pid, signal.SIGINT)
+            stdout, stderr = process.communicate(timeout=10)
+            self.assertNotEqual(process.returncode, 0, stdout + stderr)
+            self.assertEqual(self.git('rev-parse', 'HEAD'), previous)
+            with self.assertRaises(ProcessLookupError):
+                os.kill(int(marker.read_text()), 0)
+            self.assertEqual(list(self.scratch.iterdir()), [])
+        finally:
+            if process.poll() is None:
+                os.killpg(process.pid, signal.SIGTERM)
+                process.communicate(timeout=10)
+            if marker.exists():
+                try:
+                    os.killpg(int(marker.read_text()), signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            process.stdout.close()
+            process.stderr.close()

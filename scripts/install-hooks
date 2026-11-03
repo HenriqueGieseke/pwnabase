@@ -1,0 +1,59 @@
+#!/usr/bin/env python3
+"""Enable this project's hooks without replacing other active hook setups."""
+
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+
+def git(root, *args, optional=False):
+    result = subprocess.run(['git', '-C', str(root), *args], capture_output=True, text=True)
+    if result.returncode and not (optional and result.returncode == 1):
+        raise RuntimeError(result.stderr.strip() or 'Git configuration command failed')
+    if optional and result.returncode == 1:
+        return None
+    return result.stdout.strip()
+
+
+def main():
+    try:
+        if sys.platform != 'linux':
+            raise RuntimeError('Hook installation currently supports Linux only')
+        root = Path(__file__).resolve().parents[1]
+        if Path(git(root, 'rev-parse', '--show-toplevel')).resolve() != root:
+            raise RuntimeError('Run the installer from its repository checkout')
+        actual_git = Path(git(root, 'rev-parse', '--absolute-git-dir')).resolve()
+        common = Path(git(root, 'rev-parse', '--path-format=absolute', '--git-common-dir')).resolve()
+        if actual_git != common:
+            raise RuntimeError('Linked worktree hook installation is unsupported; shared Git configuration was not changed')
+        for name in ['.githooks/pre-commit', 'scripts/check']:
+            path = root / name
+            if not path.is_file() or not os.access(path, os.X_OK):
+                raise RuntimeError(f'Required executable is missing: {name}')
+            git(root, 'ls-files', '--error-unmatch', name)
+        configured = git(root, 'config', '--path', '--get', 'core.hooksPath', optional=True)
+        expected = root / '.githooks'
+        if configured is not None:
+            current = Path(configured)
+            current = current if current.is_absolute() else root / current
+            if current.resolve() != expected.resolve():
+                raise RuntimeError(f'Conflicting core.hooksPath: {configured}; configuration was not changed')
+            print('Project hooks already enabled: .githooks')
+            return 0
+        hooks = Path(git(root, 'rev-parse', '--git-path', 'hooks'))
+        hooks = hooks if hooks.is_absolute() else root / hooks
+        if hooks.exists():
+            for hook in hooks.iterdir():
+                if not hook.name.endswith('.sample') and hook.is_file() and os.access(hook, os.X_OK):
+                    raise RuntimeError(f'Existing active hook: {hook.name}; configuration was not changed')
+        git(root, 'config', '--local', 'core.hooksPath', '.githooks')
+        print('Project hooks enabled: .githooks (checkout-local Git configuration)')
+        return 0
+    except (OSError, RuntimeError) as exc:
+        print(f'Cannot install hooks: {exc}', file=sys.stderr)
+        return 1
+
+
+if __name__ == '__main__':
+    sys.exit(main())

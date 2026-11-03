@@ -96,6 +96,13 @@ assumptions into this local workflow.
 
 Run from the project root:
 
+Prefer `./scripts/check` for the required fast checks or `./scripts/check --staged`
+for the indexed tree. Enable the commit guardrail once per checkout with
+`./scripts/install-hooks`. See [the check guide](checks.md) for exact behavior,
+dependencies, conflict handling and local enforcement limits.
+
+The individual check commands remain useful for focused development:
+
 ```sh
 python3 -m py_compile recover.py pwnabase/*.py tests/*.py
 python3 -m unittest discover -s tests -v

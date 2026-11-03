@@ -15,3 +15,5 @@ Use the single-context layout. Read docs/agents/domain.md before exploring domai
 ### Architecture and verification
 
 Read docs/architecture.md before changing recovery modules or choosing verification commands.
+
+For check-runner changes or hook installation, read docs/checks.md. Use the check runner before committing; the installed hook checks staged content automatically.

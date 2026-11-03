@@ -138,7 +138,7 @@ def main():
             raise CheckFailure('Repository checks currently support Linux only')
         if sys.version_info < (3, 10):
             raise CheckFailure('Python 3.10+ is required; install it before checking')
-        repository = Path(__file__).resolve().parents[1]
+        repository = Path(__file__).absolute().parents[1].resolve()
         env = os.environ.copy()
         env['GIT_OPTIONAL_LOCKS'] = '0'
         git = shutil.which('git')
@@ -179,6 +179,7 @@ def main():
             print(f'Checking {stage}...', flush=True)
             sources = [root / 'recover.py', *sorted((root / 'pwnabase').glob('*.py')),
                        *sorted((root / 'tests').glob('*.py')), root / 'scripts/check']
+            sources.extend(path for path in [root / 'scripts/install-hooks', root / '.githooks/pre-commit'] if path.exists())
             require([sys.executable, '-m', 'py_compile', *map(str, sources)], root, child_env)
             stage = 'Python tests'
             print(f'Checking {stage}...', flush=True)
