@@ -26,4 +26,21 @@ outlive its leader.
 
 The check runner's own tests use small temporary fixture repositories containing
 only a controlled test workload; they do not recursively run this entire suite.
-Staged-snapshot mode and hook activation follow in tickets 9 and 10.
+
+## Staged checks
+
+Run `./scripts/check --staged` to test exactly what is staged. This exports raw
+index blobs and executable modes to an isolated temporary snapshot. Working-tree
+line-ending rules and checkout filters cannot alter those bytes. Staged additions
+and deletions are respected, and partially staged files use their indexed version.
+No stash, reset or index refresh is performed.
+
+Staged mode checks staged whitespace only. Unrelated unstaged test failures or
+whitespace do not block a clean staged tree. Working-file mode still checks both
+staged and unstaged whitespace. Runtime compatibility comes from the staged
+manifest, while the selected executable can remain outside the snapshot.
+
+Resolve unmerged entries and fully stage or remove intent-to-add entries first.
+Tracked symlinks/submodules are unsupported and fail explicitly rather than
+following links outside the snapshot. All snapshots/caches are removed after
+success, failure or interruption. Hook activation follows in ticket 10.

@@ -29,9 +29,9 @@ def interrupt(signum, frame):
     raise Interrupted(signum)
 
 
-def command(argv, cwd, env, capture=False):
+def command(argv, cwd, env, capture=False, output=None):
     process = subprocess.Popen(argv, cwd=cwd, env=env, start_new_session=True,
-                               stdout=subprocess.PIPE if capture else None, text=True)
+                               stdout=output if output is not None else subprocess.PIPE if capture else None, text=True)
     try:
         output, _ = process.communicate()
         return process.returncode, output or ''
@@ -60,11 +60,11 @@ def command(argv, cwd, env, capture=False):
         raise
 
 
-def require(argv, cwd, env, capture=False):
-    code, output = command(argv, cwd, env, capture)
+def require(argv, cwd, env, capture=False, output=None):
+    code, result = command(argv, cwd, env, capture, output)
     if code:
         raise CheckFailure(f'{Path(argv[0]).name} failed (exit {code})', code if code > 0 else 1)
-    return output
+    return result
 
 
 def compatible(version, policy):
@@ -82,9 +82,9 @@ def compatible(version, policy):
     return any(alternatives)
 
 
-def select_node(root, env):
+def select_node(root, runtime_root, env):
     policy = json.loads((root / 'frontend/package.json').read_text())['engines']['node']
-    local = root / 'frontend/.runtime/node_modules/node/bin/node'
+    local = runtime_root / 'frontend/.runtime/node_modules/node/bin/node'
     installed = shutil.which('node', path=env.get('PATH'))
     for candidate in [str(local), installed]:
         if not candidate or not os.access(candidate, os.X_OK):
@@ -96,9 +96,40 @@ def select_node(root, env):
     raise CheckFailure(f'No compatible Node found (required: {policy}). Install a compatible runtime before checking; nothing was downloaded.')
 
 
+def export_index(git, repository, destination, env):
+    entries = require([git, 'ls-files', '--stage', '-z'], repository, env, capture=True)
+    files = []
+    for entry in entries.split('\0'):
+        if not entry:
+            continue
+        metadata, name = entry.split('\t', 1)
+        mode, object_id, stage = metadata.split()
+        if stage != '0':
+            raise CheckFailure('Resolve unmerged index entries before staged checks')
+        if mode not in {'100644', '100755'}:
+            raise CheckFailure(f'Staged checks do not support symlinks or submodules: {name!r}')
+        files.append((mode, object_id, name))
+    visible = require([git, 'diff', '--cached', '--name-only', '--ita-visible-in-index', '-z'], repository, env, capture=True)
+    hidden = require([git, 'diff', '--cached', '--name-only', '--ita-invisible-in-index', '-z'], repository, env, capture=True)
+    if visible != hidden:
+        raise CheckFailure('Stage or remove intent-to-add entries before staged checks')
+    destination.mkdir()
+    for mode, object_id, name in files:
+        target = destination / name
+        if not target.resolve().is_relative_to(destination):
+            raise CheckFailure(f'Invalid staged path: {name!r}')
+        target.parent.mkdir(parents=True, exist_ok=True)
+        # Read blobs directly: checkout-index would apply working-tree attributes
+        # and smudge/line-ending filters, potentially changing the staged bytes.
+        with target.open('wb') as stream:
+            require([git, 'cat-file', 'blob', object_id], repository, env, output=stream)
+        target.chmod(0o755 if mode == '100755' else 0o644)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--real-tools', action='store_true', help='Explicitly enable synthetic Hashcat/extractor integrations')
+    parser.add_argument('--staged', action='store_true', help='Check an isolated export of the Git index')
     args = parser.parse_args()
     stage = 'prerequisites'
     started = time.monotonic()
@@ -107,19 +138,25 @@ def main():
             raise CheckFailure('Repository checks currently support Linux only')
         if sys.version_info < (3, 10):
             raise CheckFailure('Python 3.10+ is required; install it before checking')
-        root = Path(__file__).resolve().parents[1]
+        repository = Path(__file__).resolve().parents[1]
         env = os.environ.copy()
         env['GIT_OPTIONAL_LOCKS'] = '0'
         git = shutil.which('git')
         if not git:
             raise CheckFailure('Git is required; install it before checking')
-        top = require([git, 'rev-parse', '--show-toplevel'], root, env, capture=True).strip()
-        if Path(top).resolve() != root:
+        top = require([git, 'rev-parse', '--show-toplevel'], repository, env, capture=True).strip()
+        if Path(top).resolve() != repository:
             raise CheckFailure('Run the check command from its repository checkout')
-        node = select_node(root, env)
-        print(f'Python: {sys.executable}; Node: {node}', flush=True)
         with tempfile.TemporaryDirectory(prefix='pwnabase-check-') as directory:
             temporary = Path(directory)
+            root = repository
+            if args.staged:
+                stage = 'staged snapshot'
+                export_index(git, repository, temporary / 'snapshot', env)
+                root = temporary / 'snapshot'
+            stage = 'prerequisites'
+            node = select_node(root, repository, env)
+            print(f'Python: {sys.executable}; Node: {node}', flush=True)
             # Give every child the same Node, including tests launching it by name.
             bin_path = temporary / 'bin'
             bin_path.mkdir()
@@ -131,12 +168,13 @@ def main():
             child_env['PYTHONPATH'] = str(root)
             # A Git hook exports repository-local variables. Fixture repositories
             # in the tests must not inherit the real checkout's index or Git dir.
-            for name in require([git, 'rev-parse', '--local-env-vars'], root, env, capture=True).splitlines():
+            for name in require([git, 'rev-parse', '--local-env-vars'], repository, env, capture=True).splitlines():
                 child_env.pop(name, None)
             stage = 'whitespace'
             print(f'Checking {stage}...', flush=True)
-            require([git, 'diff', '--check'], root, env)
-            require([git, 'diff', '--cached', '--check'], root, env)
+            if not args.staged:
+                require([git, 'diff', '--check'], repository, env)
+            require([git, 'diff', '--cached', '--check'], repository, env)
             stage = 'Python compilation'
             print(f'Checking {stage}...', flush=True)
             sources = [root / 'recover.py', *sorted((root / 'pwnabase').glob('*.py')),
