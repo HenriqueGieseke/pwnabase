@@ -432,13 +432,20 @@ def run(config):
                       'wordlist exhaustion means no eligible candidate matched.\n', flush=True)
                 print(f'Output: {config.output}; requested OpenCL device types: {config.device_types}', flush=True)
                 wordlist, wordinfo, label = None, None, 'ssid'
-                if prepared.wordlist_profile and not config.check:
+                if not config.ssid and not config.check:
                     wordlist, wordinfo = candidates.snapshot_wordlist(config.wordlist, work)
                     label = wordinfo['label']
+                if prepared.wordlist_profile and not config.check:
                     report_workload(config, prepared, wordlist)
                 if config.rules and not config.ssid and not prepared.wordlist_profile:
                     native, info = candidates.load_rules(config.rules.resolve(), work)
                     prepared = replace(prepared, native_rules=native, rules_info=info)
+                if monitor is not None:
+                    mode = ('ssid' if config.ssid else 'wordlist-profile' if prepared.wordlist_profile
+                            else 'native-rules' if prepared.native_rules else 'wordlist')
+                    generator = (candidates.WORDLIST_GENERATOR if prepared.wordlist_profile else
+                                 candidates.GENERATOR if config.ssid else None)
+                    monitor.configure(mode, wordinfo, prepared.rules_info, generator)
                 tool_config = tools.preflight(ToolConfig(config.hashcat, config.extractor,
                                                          config.device_types, prepared.native_rules), env, work)
                 if config.ssid or prepared.wordlist_profile:
@@ -459,9 +466,6 @@ def run(config):
                 monitor.update('running')
                 if not config.handshakes.is_dir():
                     raise ToolError(f'Capture directory does not exist: {config.handshakes}')
-                if not config.ssid and wordlist is None:
-                    wordlist, wordinfo = candidates.snapshot_wordlist(config.wordlist, work)
-                    label = wordinfo['label']
                 store = storage.ResultStore(config.output)
                 store.prepare(label)
                 captures = sorted(p for p in config.handshakes.iterdir()

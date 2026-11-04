@@ -34,6 +34,8 @@ if '--version' in args:
     print('synthetic tool 1')
 elif '-I' in args:
     print('Type.....: CPU')
+elif '--stdout' in args:
+    print('synthetic rule validation')
 elif '-o' in args:
     source = pathlib.Path(args[2]).read_text()
     if source == 'bad':
@@ -87,6 +89,65 @@ else:
         self.assertEqual(status['state'], 'completed')
         self.assertTrue(status['updated_at'])
         self.assertNotIn('testpass123', json.dumps(status))
+
+    def test_batch_configurations_follow_content_not_wordlist_filename(self):
+        (self.captures / 'capture.pcap').write_text(tools.synthetic_record() + '\n')
+        output = self.root / 'out'
+        def run_with(path):
+            command = self.command(output)
+            command[command.index('--wordlist') + 1] = str(path)
+            result = subprocess.run(command, capture_output=True, text=True, timeout=20)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            return json.loads((output / '.pwnabase/batch-status.json').read_text())
+        first = run_with(self.words)
+        renamed = self.root / 'renamed.txt'
+        renamed.write_bytes(self.words.read_bytes())
+        second = run_with(renamed)
+        self.assertNotEqual(first['run_id'], second['run_id'])
+        self.assertEqual(first['configuration_id'], second['configuration_id'])
+        renamed.write_bytes(b'different-synthetic-word\n')
+        third = run_with(renamed)
+        self.assertNotEqual(first['configuration_id'], third['configuration_id'])
+        runs = list((output / '.pwnabase/batch-runs').glob('*.json'))
+        self.assertEqual(len(runs), 3)
+
+    def test_batch_configurations_distinguish_modes_and_rule_behavior(self):
+        output = self.root / 'out'
+        def run_command(extra, ssid=False):
+            command = self.command(output)
+            if ssid:
+                index = command.index('--wordlist')
+                del command[index:index + 2]
+            result = subprocess.run(command + extra, capture_output=True, text=True, timeout=20)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            return json.loads((output / '.pwnabase/batch-status.json').read_text())
+        plain = run_command([])
+        ssid = run_command(['--ssid'], ssid=True)
+        light = run_command(['--ssid-rules', 'light'])
+        full = run_command(['--ssid-rules'])
+        catalog = self.root / 'native.json'
+        data = json.loads((ROOT / 'rules/basic.json').read_text())
+        catalog.write_text(json.dumps(data))
+        native = run_command(['--rules', str(catalog)])
+        data['rules'][0]['expression'] = 'l'
+        catalog.write_text(json.dumps(data))
+        changed = run_command(['--rules', str(catalog)])
+        self.assertEqual(ssid['source_label'], 'SSID')
+        self.assertEqual({plain['mode'], ssid['mode'], light['mode'], native['mode']},
+                         {'wordlist', 'ssid', 'wordlist-profile', 'native-rules'})
+        self.assertEqual(len({item['configuration_id'] for item in
+                              (plain, ssid, light, full, native, changed)}), 6)
+
+    def test_unwritable_batch_history_does_not_hide_live_status(self):
+        output = self.root / 'out'
+        runtime = output / '.pwnabase'
+        runtime.mkdir(parents=True)
+        (runtime / 'batch-runs').write_text('not a directory')
+        result = subprocess.run(self.command(output), capture_output=True, text=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        status = json.loads((runtime / 'batch-status.json').read_text())
+        self.assertEqual(status['state'], 'completed')
+        self.assertIn('configuration_id', status)
 
     def test_batch_status_tracks_running_interruption_and_failed_preflight(self):
         (self.captures / 'capture.pcap').write_text('wait')

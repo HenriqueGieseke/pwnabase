@@ -4,7 +4,7 @@ import { mkdtemp, mkdir, writeFile, rename, unlink, symlink, rm, readFile } from
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createStore, SHEETS } from '../server/utils/sheets.mjs'
-import { readBatchStatus } from '../server/utils/batch-status.mjs'
+import { readBatchStatus, readBatchConfigurations } from '../server/utils/batch-status.mjs'
 
 test('batch status is read-only, filtered and detects stale runs', async t => {
   const { root, put } = await fixture(t)
@@ -29,6 +29,23 @@ test('batch status is read-only, filtered and detects stale runs', async t => {
   await unlink(file)
   await symlink(join(root, 'complete'), file)
   assert.equal(await readBatchStatus(root), null)
+})
+
+test('batch configurations group identical identities and number changed contents', async t => {
+  const { root, put } = await fixture(t)
+  const record = (run, config, label, time) => ({ schema_version: 1, run_id: run.repeat(32),
+    configuration_id: config.repeat(64), source_label: label, mode: 'wordlist', rule_label: null,
+    state: 'completed', started_at: time, updated_at: time })
+  await put(`.pwnabase/batch-runs/${'a'.repeat(32)}.json`, record('a', 'a', 'words', '2026-01-01T00:00:00Z'))
+  await put(`.pwnabase/batch-runs/${'b'.repeat(32)}.json`, record('b', 'a', 'renamed', '2026-01-02T00:00:00Z'))
+  await put(`.pwnabase/batch-runs/${'d'.repeat(32)}.json`, record('d', 'c', 'words 2', '2026-01-03T00:00:00Z'))
+  await put(`.pwnabase/batch-runs/${'c'.repeat(32)}.json`, record('c', 'b', 'words', '2026-01-04T00:00:00Z'))
+  const groups = await readBatchConfigurations(root)
+  assert.equal(groups.length, 3)
+  assert.equal(groups[0].label, 'words')
+  assert.equal(groups[0].latest.run_id, 'b'.repeat(32))
+  assert.equal(groups[1].label, 'words 2')
+  assert.equal(groups[2].label, 'words 3')
 })
 
 async function fixture(t) {
