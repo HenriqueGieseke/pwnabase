@@ -166,6 +166,37 @@ else:
         self.assertEqual(status['outcomes']['recovered'], 1)
         self.assertNotIn('testpass123', json.dumps(status))
 
+    def test_batch_events_retain_meaningful_safe_run_history(self):
+        (self.captures / 'capture.pcap').write_text(tools.synthetic_record() + '\n')
+        output = self.root / 'out'
+        result = subprocess.run(self.command(output), capture_output=True, text=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        status = json.loads((output / '.pwnabase/batch-status.json').read_text())
+        event_file = output / '.pwnabase/batch-events' / (status['run_id'] + '.jsonl')
+        raw = event_file.read_text()
+        events = [json.loads(line) for line in raw.splitlines()]
+        self.assertEqual(events[0]['kind'], 'batch_started')
+        self.assertIn('capture_started', [event['kind'] for event in events])
+        self.assertIn('record_recovered', [event['kind'] for event in events])
+        self.assertEqual(events[-1]['kind'], 'batch_completed')
+        self.assertNotIn('testpass123', raw)
+
+    def test_batch_events_never_copy_unsafe_tool_diagnostics(self):
+        (self.captures / 'capture.pcap').write_text('bad')
+        self.tool.write_text(self.tool.read_text().replace("    if source == 'bad':\n        sys.exit(1)",
+                             "    if source == 'bad':\n        print('synthetic-private-diagnostic', flush=True)\n        sys.exit(1)"))
+        output = self.root / 'out'
+        result = subprocess.run(self.command(output), capture_output=True, text=True, timeout=20)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        status = json.loads((output / '.pwnabase/batch-status.json').read_text())
+        raw = (output / '.pwnabase/batch-events' / (status['run_id'] + '.jsonl')).read_text()
+        self.assertIn('capture_failed', raw)
+        self.assertIn('batch_failed', raw)
+        capture_failure = next(json.loads(line) for line in raw.splitlines()
+                               if json.loads(line)['kind'] == 'capture_failed')
+        self.assertEqual(capture_failure['category'], 'tool')
+        self.assertNotIn('synthetic-private-diagnostic', raw)
+
     def test_status_finishes_source_with_no_eligible_candidates(self):
         (self.captures / 'capture.pcap').write_text(tools.synthetic_record() + '\n')
         self.words.write_bytes(b'a\n')

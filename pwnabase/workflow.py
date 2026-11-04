@@ -261,6 +261,7 @@ def _recover_transformed_wordlist(record, context, stream, checkpoint_path,
             if context.monitor:
                 context.monitor.publish(hashcat_confirmed_candidates=hashcat_confirmed,
                                         checkpointed_candidates=hashcat_confirmed)
+                context.monitor.event('checkpoint_saved')
             confirmed_this_run += batch.candidate_count
             print(f'  Candidate batch {batch_number} complete: {batch.candidate_count:,} candidates; '
                   f'Hashcat confirmed exhaustion and checkpointed progress in {elapsed:.1f}s total.',
@@ -349,6 +350,8 @@ def process_capture(path, context, counts):
         storage.add_source(previous, source)
         storage.atomic_json(no_usable, previous)
         counts['skipped_unusable'] += 1
+        if context.monitor:
+            context.monitor.event('capture_skipped')
         return 0
     print('  [Extraction] Reading authentication records...', flush=True)
     records = tools.extract_capture(snapshot, context.tools.extractor, env, work)
@@ -361,6 +364,8 @@ def process_capture(path, context, counts):
         storage.atomic_json(no_usable, result)
         print(f'  No usable handshake; saved {no_usable}', flush=True)
         counts['no_usable_handshake'] += 1
+        if context.monitor:
+            context.monitor.event('capture_unusable')
         return 0
     store.clear(no_usable)
     for record_id, record in records.items():
@@ -390,6 +395,8 @@ def process_capture(path, context, counts):
                     storage.atomic_json(previous_path, previous)
                 store.clear(error)
                 counts['skipped_' + previous['status']] += 1
+                if context.monitor:
+                    context.monitor.event('record_skipped')
                 continue
             checkpoint_path, checkpoint_identity, checkpoint = None, None, None
             if wordlist_profile:
@@ -423,6 +430,8 @@ def process_capture(path, context, counts):
             store.clear(error)
             print(f'  {status}: {time.monotonic() - attempt_started:.1f}s; saved {success if password is not None else exhausted}', flush=True)
             counts[status] += 1
+            if context.monitor:
+                context.monitor.event('record_recovered' if password is not None else 'record_exhausted')
         except (OSError, ValueError, ToolError) as exc:
             generation = outcome.generation
             result = storage.result_base('tool_error', source, wordinfo, prepared.rules_info)
@@ -432,6 +441,9 @@ def process_capture(path, context, counts):
             result.update(record=record, error=str(exc))
             storage.atomic_json(error, result)
             counts['tool_error'] += 1
+            if context.monitor:
+                context.monitor.event('record_failed', 'tool' if isinstance(exc, ToolError) else
+                                      'filesystem' if isinstance(exc, OSError) else 'input')
             print(f'  Record {record_id[:12]}: {exc}; continuing with remaining inputs.', file=sys.stderr, flush=True)
         finally:
             if context.monitor:
@@ -527,6 +539,7 @@ def run(config):
                 if config.check:
                     return BatchResult(0, dict(counts), stats.records_seen, stats.captures_visited)
                 monitor.update('running')
+                monitor.event('batch_running')
                 if not config.handshakes.is_dir():
                     raise ToolError(f'Capture directory does not exist: {config.handshakes}')
                 store = storage.ResultStore(config.output)
@@ -543,6 +556,7 @@ def run(config):
                                     hashcat=None, resumed=False, generated_candidates=None,
                                     hashcat_confirmed_candidates=None, checkpointed_candidates=None,
                                     source_words=None, wordlist_position=None, wordlist_size=None)
+                    monitor.event('capture_started')
                     print(f'[{index}/{len(captures)}] {path.name}', flush=True)
                     try:
                         process_capture(path, context, counts)
@@ -559,6 +573,8 @@ def run(config):
                         result['error'] = str(exc)
                         storage.atomic_json(store.path('tool-error', f'path-{error_id}'), result)
                         counts['tool_error'] += 1
+                        monitor.event('capture_failed', 'tool' if isinstance(exc, ToolError) else
+                                      'filesystem' if isinstance(exc, OSError) else 'input')
                         print(f'  Capture error: {exc}; continuing with remaining inputs.', file=sys.stderr, flush=True)
                     else:
                         error_id = hashlib.sha256(str(path).encode()).hexdigest()

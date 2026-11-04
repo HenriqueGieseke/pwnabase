@@ -37,6 +37,14 @@ def atomic_json(path, value):
         Path(name).unlink(missing_ok=True)
 
 
+def append_event(directory, run_id, event):
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    path = directory / (run_id + '.jsonl')
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, 'a', encoding='utf-8') as stream:
+        stream.write(json.dumps(event, ensure_ascii=True, separators=(',', ':')) + '\n')
+
+
 def read_json(path):
     return json.loads(path.read_text(encoding='utf-8')) if path.exists() else None
 

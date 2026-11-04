@@ -18,6 +18,7 @@ class BatchMonitor:
     def __init__(self, runtime):
         self.path = runtime / 'batch-status.json'
         self.runs = runtime / 'batch-runs'
+        self.events = runtime / 'batch-events'
         self.state = {'schema_version': 1, 'run_id': uuid.uuid4().hex,
                       'state': 'starting', 'started_at': timestamp()}
         self.lock = threading.Lock()
@@ -63,8 +64,31 @@ class BatchMonitor:
             self.state['updated_at'] = timestamp()
             self._save()
 
+    def event(self, kind, category=None):
+        allowed = {'batch_started', 'batch_running', 'batch_completed', 'batch_interrupted',
+                   'batch_failed', 'capture_started', 'capture_unusable', 'capture_skipped',
+                   'record_recovered', 'record_exhausted', 'record_skipped', 'record_failed',
+                   'capture_failed', 'checkpoint_saved'}
+        if kind not in allowed:
+            raise ValueError('Unsupported batch event')
+        with self.lock:
+            event = {'kind': kind, 'at': timestamp()}
+            if category in {'tool', 'input', 'filesystem', 'unknown'}:
+                event['category'] = category
+            for key in ('capture_name', 'ssid', 'bssid'):
+                value = self.state.get(key)
+                if isinstance(value, str):
+                    event[key] = value[:512]
+            try:
+                storage.append_event(self.events, self.state['run_id'], event)
+            except OSError:
+                if not self.warned:
+                    print('Batch status or history could not be saved; recovery continues.', file=sys.stderr)
+                    self.warned = True
+
     def __enter__(self):
         self.update('starting')
+        self.event('batch_started')
         def heartbeat():
             while not self.stop.wait(5):
                 self.update()
@@ -82,3 +106,11 @@ class BatchMonitor:
         else:
             state = 'completed'
         self.update(state)
+        if state == 'failed':
+            from .tools import ToolError
+            category = ('tool' if isinstance(value, (ToolError, TimeoutError)) else
+                        'filesystem' if isinstance(value, OSError) else
+                        'input' if isinstance(value, ValueError) else 'unknown')
+            self.event('batch_failed', category)
+        else:
+            self.event('batch_' + state)

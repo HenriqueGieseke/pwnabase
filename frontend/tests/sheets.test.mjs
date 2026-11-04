@@ -5,6 +5,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createStore, SHEETS } from '../server/utils/sheets.mjs'
 import { readBatchStatus, readBatchConfigurations } from '../server/utils/batch-status.mjs'
+import { readBatchEvents } from '../server/utils/batch-events.mjs'
+import { createEventQueue } from '../app/utils/event-queue.mjs'
 
 test('batch status is read-only, filtered and detects stale runs', async t => {
   const { root, put } = await fixture(t)
@@ -53,6 +55,48 @@ test('batch configurations group identical identities and number changed content
   assert.equal(groups[0].latest.run_id, 'b'.repeat(32))
   assert.equal(groups[1].label, 'words 2')
   assert.equal(groups[2].label, 'words 3')
+})
+
+test('batch events page backwards without leaking fields or duplicating newer writes', async t => {
+  const { root } = await fixture(t)
+  const directory = join(root, '.pwnabase', 'batch-events')
+  await mkdir(directory, { recursive: true })
+  const run = 'a'.repeat(32)
+  const file = join(directory, `${run}.jsonl`)
+  const line = index => JSON.stringify({ kind: 'capture_started', at: '2026-01-01T00:00:00Z',
+    capture_name: `capture-${index}`, password: 'synthetic-secret' }) + '\n'
+  await writeFile(file, Array.from({ length: 250 }, (_, i) => line(i)).join(''))
+  const latest = await readBatchEvents(root, run)
+  assert.equal(latest.events.length, 200)
+  assert.equal(latest.events[0].capture_name, 'capture-50')
+  await writeFile(file, line(250), { flag: 'a' })
+  const older = await readBatchEvents(root, run, latest.before)
+  assert.equal(older.events.length, 50)
+  assert.equal(older.events.at(-1).capture_name, 'capture-49')
+  assert.equal(older.before, null)
+  assert.ok(!JSON.stringify(latest).includes('synthetic-secret'))
+  assert.equal((await readBatchEvents(root, '../private')).events.length, 0)
+  await writeFile(file, Array.from({ length: 450 }, (_, i) => line(i + 251)).join(''), { flag: 'a' })
+  const newest = await readBatchEvents(root, run)
+  const middle = await readBatchEvents(root, run, newest.before)
+  const bridge = await readBatchEvents(root, run, middle.before)
+  assert.equal(newest.events[0].capture_name, 'capture-501')
+  assert.equal(middle.events[0].capture_name, 'capture-301')
+  assert.equal(bridge.events.at(-1).capture_name, 'capture-300')
+})
+
+test('event refresh finishes before a simultaneous older-page request', async () => {
+  const queue = createEventQueue()
+  const order = []
+  let unblock
+  const barrier = new Promise(resolve => { unblock = resolve })
+  const latest = queue.refresh(async () => { order.push('latest-start'); await barrier; order.push('latest-end') })
+  const older = queue.older(async () => { order.push('older') })
+  await Promise.resolve()
+  assert.deepEqual(order, ['latest-start'])
+  unblock()
+  await Promise.all([latest, older])
+  assert.deepEqual(order, ['latest-start', 'latest-end', 'older'])
 })
 
 async function fixture(t) {
