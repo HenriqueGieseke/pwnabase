@@ -18,7 +18,17 @@ const batchStatus = ref(null)
 const configurations = ref([])
 const selectedConfiguration = ref(null)
 const manualConfiguration = ref(false)
-const displayedBatch = computed(() => configurations.value.find(item => item.id === selectedConfiguration.value)?.latest || batchStatus.value)
+const selectedRun = ref(null)
+const displayedBatch = computed(() => (selectedRun.value && (historyRuns.value.find(run => run.run_id === selectedRun.value.run_id) || selectedRun.value)) || configurations.value.find(item => item.id === selectedConfiguration.value)?.latest || batchStatus.value)
+const historyRuns = ref([])
+const historyBefore = ref(null)
+const historyConfig = ref(null)
+const historyBytes = ref(0)
+const historyError = ref('')
+const olderHistoryLoaded = ref(false)
+const loadingOlderHistory = ref(false)
+const historyQueue = createEventQueue()
+let historyGap = null
 const events = ref([])
 const eventsBefore = ref(null)
 const eventRun = ref(null)
@@ -95,7 +105,8 @@ async function load(force = false) {
       if (number !== request) return
       batchStatus.value = result.status
       configurations.value = result.configurations
-      if (!manualConfiguration.value) selectedConfiguration.value = result.status?.configuration_id || null
+      if (!manualConfiguration.value) { selectedConfiguration.value = result.status?.configuration_id || null; selectedRun.value = null }
+      await loadHistory()
       await loadEvents()
       error.value = ''
       refreshed.value = new Date().toLocaleTimeString()
@@ -122,6 +133,65 @@ async function load(force = false) {
       error.value = tab === 'batch-status' ? 'Could not refresh batch status; retrying automatically.' : 'Could not refresh the sheet. Showing the last available results; retrying automatically.'
     }
   } finally { if (number === request) busy.value = false }
+}
+function chooseConfiguration(id) { selectedConfiguration.value = id; selectedRun.value = null; manualConfiguration.value = true; loadHistory() }
+function chooseCurrentBatch() { selectedConfiguration.value = batchStatus.value?.configuration_id || null; selectedRun.value = null; manualConfiguration.value = false; loadHistory() }
+function chooseHistoryRun(run) { selectedRun.value = run; manualConfiguration.value = true }
+function mergeHistory(...groups) {
+  const runs = new Map(groups.flat().map(run => [run.run_id, run]))
+  return [...runs.values()].sort((a, b) =>
+    Number.isSafeInteger(a.index_position) && Number.isSafeInteger(b.index_position)
+      ? b.index_position - a.index_position
+      : b.started_at.localeCompare(a.started_at) || b.run_id.localeCompare(a.run_id))
+}
+function loadHistory() { return historyQueue.refresh(loadHistoryNow) }
+async function loadHistoryNow() {
+  const configuration = selectedConfiguration.value
+  if (!configuration) { historyRuns.value = []; historyBefore.value = null; historyConfig.value = null; historyGap = null; return }
+  if (historyConfig.value !== configuration) { historyRuns.value = []; historyBefore.value = null; historyConfig.value = configuration; olderHistoryLoaded.value = false; historyGap = null }
+  try {
+    if (!historyGap) {
+      const result = await $fetch('/api/batch-history', { query: { configuration }, timeout: 10000 })
+      if (historyConfig.value !== configuration || selectedConfiguration.value !== configuration) return
+      if (result.reset) return // Keep the current display; the next poll retries.
+      historyBytes.value = result.storage_bytes
+      if (!olderHistoryLoaded.value) { historyRuns.value = result.runs; historyBefore.value = result.before; historyError.value = ''; return }
+      const target = historyRuns.value[0]
+      historyGap = { runs: result.runs, cursor: result.before, target }
+    }
+    const gap = historyGap
+    const bridged = () => !gap.target || gap.runs.some(run => run.run_id === gap.target.run_id) || gap.cursor === null ||
+      (Number.isSafeInteger(gap.target.index_position) && /^\d+:/.test(gap.cursor) && Number(gap.cursor.split(':')[0]) <= gap.target.index_position)
+    // Limit background work per refresh, retaining the cursor for the next poll.
+    for (let pages = 0; pages < 3 && !bridged(); pages++) {
+      const page = await $fetch('/api/batch-history', { query: { configuration, before: gap.cursor }, timeout: 10000 })
+      if (historyConfig.value !== configuration || selectedConfiguration.value !== configuration) return
+      if (page.reset) { historyGap = null; olderHistoryLoaded.value = false; return loadHistoryNow() }
+      gap.runs.push(...page.runs)
+      gap.cursor = page.before === gap.cursor ? null : page.before
+    }
+    if (bridged()) { historyRuns.value = mergeHistory(historyRuns.value, gap.runs); historyGap = null }
+    historyError.value = ''
+  } catch { if (historyConfig.value === configuration) historyError.value = 'Could not load run history.' }
+}
+async function loadOlderHistory() {
+  if (loadingOlderHistory.value) return
+  loadingOlderHistory.value = true
+  try {
+    await historyQueue.older(async () => {
+      const configuration = historyConfig.value, before = historyBefore.value
+      if (!configuration || before === null) return
+      const result = await $fetch('/api/batch-history', { query: { configuration, before }, timeout: 10000 })
+      if (historyConfig.value !== configuration || selectedConfiguration.value !== configuration) return
+      if (result.reset) { historyGap = null; olderHistoryLoaded.value = false; return loadHistoryNow() }
+      historyRuns.value = mergeHistory(historyRuns.value, result.runs)
+      historyBefore.value = result.before
+      historyBytes.value = result.storage_bytes
+      olderHistoryLoaded.value = true
+      historyError.value = ''
+    })
+  } catch { historyError.value = 'Could not load older runs.' }
+  finally { loadingOlderHistory.value = false }
 }
 function loadEvents() {
   return eventQueue.refresh(loadEventsNow)
@@ -188,6 +258,7 @@ watch(() => [active.value, view.value.search, view.value.hideDuplicates, view.va
   debounce = setTimeout(() => load(true), 250)
 })
 watch(() => displayedBatch.value?.run_id, () => { if (active.value === 'batch-status') loadEvents() })
+watch(selectedConfiguration, () => { if (active.value === 'batch-status') loadHistory() })
 onMounted(() => { load(); timer = setInterval(() => load(), 5000) })
 onUnmounted(() => { clearTimeout(debounce); clearInterval(timer); controller?.abort() })
 const generationFields = computed(() => ['seeds', 'generated', 'duplicates', 'rejected_length', 'eligible', 'non_utf8_seeds', 'valid_utf8', 'source_complete'].filter(key => Object.hasOwn(detail.value?.data?.candidate_generation || {}, key)))
@@ -211,7 +282,7 @@ const ruleObjects = computed(() => Array.isArray(detail.value?.data?.rules) ? de
         <p class="sheet-description">{{ descriptions[active] }}</p>
         <div v-if="active === 'batch-status'" class="batch-status" aria-live="polite">
           <div v-if="error" class="notice" role="alert">{{ error }}</div>
-          <nav v-if="configurations.length" class="config-tabs" aria-label="Batch configurations"><button v-for="config in configurations" :key="config.id" :class="{ active: selectedConfiguration === config.id }" @click="selectedConfiguration = config.id; manualConfiguration = true">{{ config.label }}</button><button v-if="manualConfiguration && batchStatus" @click="selectedConfiguration = batchStatus.configuration_id || null; manualConfiguration = false">Current batch</button></nav>
+          <nav v-if="configurations.length" class="config-tabs" aria-label="Batch configurations"><button v-for="config in configurations" :key="config.id" :class="{ active: selectedConfiguration === config.id }" @click="chooseConfiguration(config.id)">{{ config.label }}</button><button v-if="manualConfiguration && batchStatus" @click="chooseCurrentBatch">Current batch</button></nav>
           <template v-if="displayedBatch"><h2>{{ displayedBatch.state }}</h2><p>Started: {{ date(displayedBatch.started_at) }}</p><p>Last update: {{ date(displayedBatch.updated_at) }}</p><p v-if="displayedBatch.state === 'unknown'">No recent update has arrived. The batch may have stopped or become unavailable.</p>
             <div class="batch-metrics">
               <section v-if="displayedBatch.capture_total !== undefined"><h3>Captures started</h3><p>{{ count(displayedBatch.capture_index) }} / {{ count(displayedBatch.capture_total) }}</p><progress v-if="percent(displayedBatch.capture_index, displayedBatch.capture_total) !== null" :value="percent(displayedBatch.capture_index, displayedBatch.capture_total)" max="100" /><p v-if="displayedBatch.capture_name">{{ displayedBatch.capture_name }}</p></section>
@@ -222,8 +293,11 @@ const ruleObjects = computed(() => Array.isArray(detail.value?.data?.rules) ? de
               <section v-if="displayedBatch.mode === 'native-rules'"><h3>Rule progress</h3><p>Current rule: Unknown</p></section>
               <section><h3>Current Hashcat invocation</h3><template v-if="displayedBatch.hashcat"><p>{{ count(displayedBatch.hashcat.done) }} / {{ count(displayedBatch.hashcat.total) }}</p><progress v-if="percent(displayedBatch.hashcat.done, displayedBatch.hashcat.total) !== null" :value="percent(displayedBatch.hashcat.done, displayedBatch.hashcat.total)" max="100" /><p>Speed: {{ count(displayedBatch.hashcat.speed) }} H/s</p><p>ETA: {{ displayedBatch.hashcat.eta_seconds === undefined ? 'Unknown' : `${count(displayedBatch.hashcat.eta_seconds)} s` }}</p></template><p v-else>Unavailable</p></section>
               <section v-if="displayedBatch.outcomes"><h3>Outcomes this run</h3><p v-for="key in ['recovered', 'exhausted', 'skipped', 'unusable', 'failed']" :key="key">{{ key }}: {{ count(displayedBatch.outcomes[key]) }}</p></section>
+              <section v-if="displayedBatch.execution_candidates"><h3>Candidate totals this run</h3><p>Generated: {{ count(displayedBatch.execution_candidates.generated) }}</p><p>Confirmed in exhausted batches: {{ count(displayedBatch.execution_candidates.confirmed) }}</p><p>Checkpointed: {{ count(displayedBatch.execution_candidates.checkpointed) }}</p></section>
+              <section v-else-if="['wordlist', 'native-rules'].includes(displayedBatch.mode)"><h3>Candidate totals this run</h3><p>Unavailable</p></section>
             </div>
             <section class="event-log"><h3>Recent events</h3><p v-if="eventsError" class="notice">{{ eventsError }}</p><button v-if="eventsBefore !== null" :disabled="loadingOlderEvents" @click="loadOlderEvents">Load older events</button><div class="event-window"><p v-for="item in events" :key="item.id"><time>{{ date(item.at) }}</time> · {{ item.kind.replaceAll('_', ' ') }}<template v-if="item.category"> · {{ item.category }}</template><template v-if="item.capture_name"> · {{ item.capture_name }}</template><template v-if="item.ssid"> · {{ item.ssid }}</template><template v-if="item.bssid"> · {{ item.bssid }}</template></p><p v-if="!events.length">No events available.</p></div></section>
+            <section v-if="selectedConfiguration" class="run-history"><h3>Run history</h3><p>Estimated history storage (based on recent runs): {{ count(historyBytes) }} bytes</p><p v-if="historyError" class="notice">{{ historyError }}</p><div class="history-list"><button v-for="run in historyRuns" :key="run.run_id" :class="{ active: displayedBatch.run_id === run.run_id }" @click="chooseHistoryRun(run)"><span>{{ date(run.started_at) }} · {{ run.state }}<template v-if="run.resumed_any"> · resumed</template></span><span>Ended: {{ run.ended_at ? date(run.ended_at) : 'Unknown' }}</span></button></div><button v-if="historyBefore !== null" class="load-history" :disabled="loadingOlderHistory" @click="loadOlderHistory">Load older runs</button></section>
           </template>
           <div v-else class="empty"><h3>No batch status yet</h3><p>Run a new recovery batch to see its status here.</p></div>
         </div>
@@ -274,5 +348,6 @@ const ruleObjects = computed(() => Array.isArray(detail.value?.data?.rules) ? de
 
 <style>
 .batch-status{min-height:430px;padding:24px;color:#b7c9bd}.batch-status h2{text-transform:capitalize;color:#e1f3e6;font-size:20px}.batch-status p{font-size:13px;line-height:1.6}.config-tabs{display:flex;gap:8px;flex-wrap:wrap}.config-tabs button{border:1px solid #445449;border-radius:5px;padding:8px 12px;color:#b7c9bd}.config-tabs button.active{background:#2b4032;color:#e1f3e6}.batch-metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px}.batch-metrics section{border:1px solid #34463b;border-radius:5px;padding:12px;background:#1b251e}.batch-metrics h3{font-size:12px;color:#d8e7dc}.batch-metrics p{margin:5px 0;overflow-wrap:anywhere}.batch-metrics progress{width:100%;accent-color:#a8d9b7}.event-log{margin-top:20px}.event-log h3{font-size:13px}.event-log button{border:1px solid #445449;border-radius:5px;padding:7px 10px;font-size:11px}.event-window{height:200px;overflow:auto;margin-top:8px;padding:10px;background:#111913;border:1px solid #34463b;border-radius:5px}.event-window p{font-family:ui-monospace,monospace;font-size:11px;margin:4px 0;overflow-wrap:anywhere}.event-window time{color:#8ea797}
+.run-history{margin-top:20px}.run-history h3{font-size:13px}.history-list{max-height:260px;overflow:auto}.history-list button{display:flex;width:100%;justify-content:space-between;text-align:left;gap:12px;padding:12px;border-bottom:1px solid #34463b;font-size:12px;color:#b7c9bd}.history-list button.active{background:#2b4032;color:#e1f3e6}.load-history{margin-top:8px;border:1px solid #445449;border-radius:5px;padding:7px 10px;font-size:11px}
 :root{color-scheme:dark;font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#101312;color:#e6eae7;font-synthesis:none}*{box-sizing:border-box}body{margin:0}button,input,select{font:inherit}button{cursor:pointer;color:inherit}button:disabled{cursor:default;opacity:.4}button:focus-visible,input:focus-visible,select:focus-visible,tr:focus-visible{outline:2px solid #91d6ac;outline-offset:-2px}button{background:none;border:0}.topbar{min-height:76px;gap:16px;flex-wrap:wrap;border-bottom:1px solid #2a302c;display:flex;align-items:center;justify-content:space-between;padding:0 40px;background:#141816}.brand{display:flex;gap:13px;align-items:center;font-size:15px;font-weight:750;letter-spacing:2px}.mark{display:grid;place-items:center;font-size:29px;line-height:1;width:35px;height:35px;background:#afd8b7;color:#14251b;border-radius:6px}.brand-label{font-weight:450;color:#87928b;letter-spacing:1.4px;font-size:10px;border-left:1px solid #3a443d;margin-left:20px;padding-left:20px}.topbar-status{display:flex;align-items:center;justify-content:flex-end;gap:20px;flex-wrap:wrap;margin-left:auto}.local{display:flex;align-items:center;gap:9px;color:#a1aaa4;font-size:12px}.dot{display:inline-block;width:6px;height:6px;background:#a2d5ae;border-radius:50%;flex-shrink:0}.separator{color:#515e55;margin:0 6px}main{max-width:1900px;padding:24px 40px;margin:auto}.live{display:flex;align-items:center;gap:8px;color:#b8c7bd;font-size:10px;letter-spacing:1px;background:#1c2720;border:1px solid #314136;padding:10px 13px;border-radius:5px}.live>span:last-child{color:#859b8c;letter-spacing:0;margin-left:7px}.sheet-shell{background:#171c19;border:1px solid #343e37;border-radius:8px;overflow:hidden;box-shadow:0 15px 55px #0002}.sheet-title{padding:24px 24px 0;display:flex;align-items:center;justify-content:space-between}.sheet-title>div{display:flex;align-items:center;gap:10px}.sheet-icon{color:#a8ccb1;font-size:22px}.sheet-title h1{font-size:18px;font-weight:550;margin:0}.count{font-size:11px;color:#aabbb0;background:#26352b;border:1px solid #34463b;border-radius:4px;padding:3px 8px;margin-left:6px}.file-type{font-size:9px;letter-spacing:1.5px;color:#697d6f}.sheet-description{font-size:12px;color:#95a198;margin:10px 24px 23px}.toolbar{display:flex;align-items:center;gap:12px;border-top:1px solid #2c362f;border-bottom:1px solid #343e37;padding:14px 20px;background:#1b211d}.search{display:flex;align-items:center;gap:10px;border:1px solid #39433d;background:#141a16;border-radius:5px;width:310px;padding:8px 12px}.search>span{font-size:21px;color:#91a497;line-height:1}.search input{color:#e1e8e3;font-size:12px;width:100%;outline:0;background:none;border:none;min-width:0}.search input::placeholder{color:#7e9184}.search kbd{font-size:10px;border:1px solid #37473c;border-radius:3px;padding:1px 5px;color:#7c8b81}.deduplicate{display:flex;align-items:center;gap:7px;white-space:nowrap;font-size:11px;color:#b5c6bb;cursor:pointer}.deduplicate input{accent-color:#a8d9b7;width:15px;height:15px;margin:0}.filter select{background:#1c261f;border:1px solid #3a493f;border-radius:5px;padding:8px 10px;font-size:12px;color:#bdc9c0;max-width:190px}.toolbar-end{display:flex;align-items:center;gap:18px;margin-left:auto}.sync{font-size:10px;color:#7e9285}.refresh{display:flex;align-items:center;gap:7px;font-size:11px;border:1px solid #445449;padding:8px 12px;border-radius:5px;background:#26322a}.refresh span{font-size:16px}.sheet-body{display:flex;min-height:430px;height:clamp(430px,56vh,820px)}.grid-scroll{overflow:auto;flex:1;min-width:0;scrollbar-color:#415247 #1b211d;scrollbar-width:thin}table{width:100%;border-collapse:separate;border-spacing:0;font-size:12px;white-space:nowrap}th{position:sticky;top:0;background:#212923;z-index:1;border-bottom:1px solid #3e4b41;text-align:left;color:#a0b0a5;font-weight:450;height:39px}th button{font-size:10px;font-weight:550;width:100%;height:39px;text-align:left;padding:0 18px}th button span{color:#b5dec1;margin-left:6px}td{height:64px;padding:0 18px;border-right:1px solid #26312a;border-bottom:1px solid #2a352d;max-width:340px;overflow:hidden;text-overflow:ellipsis}tbody tr{cursor:pointer;background:#171e19}tbody tr:nth-child(even){background:#1a221c}tbody tr:hover{background:#243229}tbody tr.selected{background:#293d30}tbody tr.selected td:first-child{box-shadow:inset 3px 0 #a8d9b7}.row-number{width:46px;min-width:46px;padding:0 10px;text-align:center;color:#6c8273;background:#1b251e;font-size:10px;border-right:1px solid #344039;font-variant-numeric:tabular-nums}td.name{font-weight:550;color:#e1e9e3;min-width:190px}td.updated{font-size:11px;color:#91a497;min-width:155px}.mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:11px}td.password{color:#c5e6bf;min-width:170px}.row-dot{display:inline-block;width:6px;height:6px;border-radius:2px;background:#9acd9b;margin-right:10px}.row-dot.exhausted{background:#c1aa72}.row-dot.tool-error{background:#d78f86}.row-dot.no-usable-handshake{background:#819caa}.row-dot.rules{background:#b0a3d4}.badge{color:#a2b6aa;border:1px solid #3b4e41;background:#223228;border-radius:4px;padding:4px 6px;font-size:9px;letter-spacing:.5px}.invalid{font-size:10px;color:#e6ac9c;margin-left:10px}.bad-row td{color:#dcb3a8}.empty{display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:340px;padding:35px;text-align:center}.empty-icon{font-size:38px;color:#668473;border:1px dashed #435d4b;border-radius:12px;width:80px;height:80px;display:grid;place-items:center;margin-bottom:10px}.empty h3{font-size:16px;font-weight:500}.empty p{font-size:12px;color:#8ea095;max-width:390px;line-height:1.7}.sheet-footer{border-top:1px solid #3c4940;padding:12px 20px;display:flex;align-items:center;justify-content:space-between;font-size:10px;color:#8d9e93;background:#1a231d}.footer-divider{margin:0 10px;color:#536d5c}.pagination{display:flex;gap:14px;align-items:center}.pagination button{border:1px solid #384d40;background:#223329;border-radius:3px;padding:3px 9px;font-size:15px}.tabs{display:flex;align-items:stretch;background:#111913;border-top:1px solid #34463b;overflow-x:auto;min-height:48px}.tabs button{display:flex;align-items:center;gap:8px;padding:0 20px;font-size:11px;color:#94a69a;border-right:1px solid #2a3a2e;white-space:nowrap;border-top:2px solid transparent}.tabs button.active{background:#2b4032;border-top-color:#aedebc;color:#e1f3e6}.tabs button:hover{background:#26392d}.tabs button span{font-size:14px;color:#91b29c}.tab-spacer{flex:1}.tabs-caption{font-size:8px;letter-spacing:1.7px;color:#536e5d;padding:18px 20px;white-space:nowrap}.page-footer{display:flex;justify-content:space-between;color:#6f8678;font-size:10px;margin-top:18px;gap:20px}.page-footer>span:first-child{display:flex;gap:8px;align-items:center}.page-footer>span:last-child{letter-spacing:1.5px;font-size:9px}.page-footer .dot{width:4px;height:4px;background:#6b977a}.details{width:365px;min-width:300px;max-width:42%;border-left:1px solid #3b5142;background:#1c2820;overflow:auto;padding:20px;scrollbar-width:thin}.details-heading{display:flex;justify-content:space-between;align-items:center;font-size:9px;color:#8ca795;letter-spacing:1.5px}.details-heading button{font-size:24px;line-height:1;color:#a7c1af;padding:0 5px}.details h3{font-size:19px;font-weight:500;overflow-wrap:anywhere;margin:22px 0 8px}.detail-filename{color:#88a493;overflow-wrap:anywhere;line-height:1.6}.detail-status{display:inline-block;font-size:10px;border:1px solid #49664f;color:#bad5be;padding:5px 9px;border-radius:4px;margin:7px 0 16px}.details dl{display:grid;grid-template-columns:90px 1fr;gap:14px 10px;font-size:11px;line-height:1.5}.details dt{color:#8da996}.details dd{margin:0;overflow-wrap:anywhere;color:#d8e7dc}.details dd.password{color:#d1edbf;white-space:pre-wrap}.raw{border-top:1px solid #39513f;margin-top:22px;padding-top:15px}.raw summary{font-size:11px;color:#a8c5b1;cursor:pointer;display:flex;justify-content:space-between}.raw pre{font-size:10px;line-height:1.7;white-space:pre-wrap;overflow-wrap:anywhere;color:#a9c3b2;background:#132018;border:1px solid #2e4435;border-radius:5px;padding:12px}.catalog-intro{font-size:12px;line-height:1.7;color:#b1c5b7}.catalog-intro>span{font-size:10px;color:#8ea797}.source-list h4{font-size:9px;color:#8ea797;letter-spacing:1px;margin-top:24px}.source-list article{padding:8px 0;border-bottom:1px solid #334b3c;overflow-wrap:anywhere}.source-list p{font-size:11px;line-height:1.6;margin:4px 0}.source-list code{font-size:9px;color:#8ea797}.profile-config{font-size:10px;white-space:pre-wrap;overflow-wrap:anywhere;color:#a9c3b2}.generation h4{font-size:9px;color:#8ea797;letter-spacing:1px;margin-top:24px}.rule-list h4{font-size:9px;color:#8ea797;letter-spacing:1px;margin-top:24px}.rule-list article{border:1px solid #395140;border-radius:5px;padding:11px;margin:9px 0}.rule-list strong{font-size:10px;font-weight:500;overflow-wrap:anywhere}.rule-list code{display:block;color:#c9e2b7;font-size:12px;margin-bottom:8px}.rule-list p{color:#92aa9a;font-size:11px;line-height:1.6;margin-bottom:0}.notice{background:#352b21;color:#e6c9a7;font-size:12px;padding:12px 20px;line-height:1.5}.details .notice{padding:10px}.muted{color:#8fa997;font-size:12px}.sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0)}@media(min-width:1600px){main{padding-top:24px}}@media(max-width:900px){.topbar{padding:14px 20px}.topbar-status{gap:10px}.brand-label{display:none}main{padding:16px}.live{font-size:9px}.live>span:last-child{display:none}.sheet-title{padding:20px 16px 0}.sheet-description{margin-left:16px;margin-right:16px;line-height:1.7}.toolbar{padding:12px;flex-wrap:wrap}.search{width:240px;flex:1}.toolbar-end{gap:8px}.sync{display:none}.details{position:absolute;right:0;top:0;bottom:0;max-width:90%;width:365px;z-index:3;box-shadow:-15px 0 40px #0005}.sheet-body{position:relative}.file-type,.tabs-caption{display:none}.tabs button{padding:0 14px}.page-footer>span:last-child{display:none}.page-footer{line-height:1.6}.sheet-footer{padding:12px;font-size:9px}.pagination{gap:8px}}@media(prefers-reduced-motion:no-preference){button,tr{transition:background-color .12s}}
 </style>

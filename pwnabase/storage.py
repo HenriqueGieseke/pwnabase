@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import tempfile
 import uuid
 
@@ -43,6 +44,69 @@ def append_event(directory, run_id, event):
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600)
     with os.fdopen(fd, 'a', encoding='utf-8') as stream:
         stream.write(json.dumps(event, ensure_ascii=True, separators=(',', ':')) + '\n')
+
+
+def append_batch_index(directory, state):
+    """Index one configured run using fixed-width, seekable run identifiers."""
+    config = state['configuration_id']
+    run_id = state['run_id']
+    if not re.fullmatch(r'[a-f0-9]{64}', config) or not re.fullmatch(r'[a-f0-9]{32}', run_id):
+        raise ValueError('Invalid batch index identity')
+    metadata = directory / (config + '.json')
+    if not metadata.exists():
+        atomic_json(metadata, {key: state.get(key) for key in
+                                ('configuration_id', 'source_label', 'mode', 'rule_label', 'started_at')})
+    fd = os.open(directory / (config + '.idx'), os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, 'ab') as stream:
+        size = os.fstat(stream.fileno()).st_size
+        if size % 33:
+            os.ftruncate(stream.fileno(), size - size % 33)
+        stream.write((run_id + '\n').encode('ascii'))
+        stream.flush()
+        os.fsync(stream.fileno())
+
+
+def prepare_batch_index(runtime):
+    """Create the index once, retaining valid run records from older versions."""
+    directory = runtime / 'batch-index'
+    if directory.is_symlink():
+        raise OSError('Batch index directory cannot be a symlink')
+    if directory.is_dir():
+        return directory
+    runs = []
+    run_directory = runtime / 'batch-runs'
+    if run_directory.is_symlink():
+        raise OSError('Batch run directory cannot be a symlink')
+    for path in run_directory.glob('*.json'):
+        try:
+            if not re.fullmatch(r'[a-f0-9]{32}\.json', path.name) or path.is_symlink():
+                continue
+            state = read_json(path)
+            if (not isinstance(state, dict) or state.get('run_id') != path.stem or
+                    not isinstance(state.get('configuration_id'), str) or
+                    not re.fullmatch(r'[a-f0-9]{64}', state['configuration_id']) or
+                    not isinstance(state.get('started_at'), str)):
+                continue
+            runs.append(state)
+        except (ValueError, UnicodeError):
+            continue
+    runs.sort(key=lambda item: (item['started_at'], item['run_id']))
+    with tempfile.TemporaryDirectory(prefix='.batch-index-', dir=runtime) as temporary:
+        target = Path(temporary)
+        for state in runs:
+            append_batch_index(target, state)
+        os.rename(target, directory)
+    return directory
+
+
+def rebuild_batch_index(runtime):
+    """Discard a possibly incomplete index; archived run records remain authoritative."""
+    directory = runtime / 'batch-index'
+    if directory.is_symlink():
+        raise OSError('Batch index directory cannot be a symlink')
+    if directory.exists():
+        shutil.rmtree(directory)
+    return prepare_batch_index(runtime)
 
 
 def read_json(path):

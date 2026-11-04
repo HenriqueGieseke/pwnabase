@@ -20,11 +20,12 @@ class BatchMonitor:
         self.runs = runtime / 'batch-runs'
         self.events = runtime / 'batch-events'
         self.state = {'schema_version': 1, 'run_id': uuid.uuid4().hex,
-                      'state': 'starting', 'started_at': timestamp()}
+                      'state': 'starting', 'started_at': timestamp(), 'resumed_any': False}
         self.lock = threading.Lock()
         self.stop = threading.Event()
         self.worker = None
         self.warned = False
+        self.archive_enabled = False
 
     def update(self, state=None):
         with self.lock:
@@ -34,8 +35,21 @@ class BatchMonitor:
             self._save()
 
     def _save(self):
+        clear_dirty = False
+        dirty = self.path.parent / 'batch-index-dirty'
+        if 'configuration_id' in self.state and not self.archive_enabled:
+            try:
+                repair = dirty.exists()
+                storage.atomic_json(dirty, {'needs_rebuild': True})
+                self.archive_enabled = True
+                index = (storage.rebuild_batch_index(self.path.parent) if repair
+                         else storage.prepare_batch_index(self.path.parent))
+                storage.append_batch_index(index, self.state)
+                clear_dirty = True
+            except (OSError, ValueError):
+                pass  # The normal warning and future heartbeat retries cover this failure.
         paths = [self.path]
-        if 'configuration_id' in self.state:
+        if 'configuration_id' in self.state and self.archive_enabled:
             paths.append(self.runs / (self.state['run_id'] + '.json'))
         for path in paths:
             try:
@@ -44,6 +58,11 @@ class BatchMonitor:
                 if not self.warned:
                     print('Batch status or history could not be saved; recovery continues.', file=sys.stderr)
                     self.warned = True
+        if clear_dirty:
+            try:
+                dirty.unlink()
+            except OSError:
+                pass  # Leaving the marker in place forces a safe rebuild later.
 
     def configure(self, mode, wordinfo, rules_info, generator):
         identity = {'mode': mode, 'wordlist': wordinfo['sha256'] if wordinfo else None,
@@ -56,11 +75,36 @@ class BatchMonitor:
             self.state.update(configuration_id=digest, source_label=label,
                               mode=mode, rule_label=rule_label)
             self.state['updated_at'] = timestamp()
-            self._save()
+            dirty = self.path.parent / 'batch-index-dirty'
+            try:
+                repair = dirty.exists()
+                storage.atomic_json(dirty, {'needs_rebuild': True})
+                self.archive_enabled = True
+                index = (storage.rebuild_batch_index(self.path.parent) if repair
+                         else storage.prepare_batch_index(self.path.parent))
+                storage.append_batch_index(index, self.state)
+                self._save()
+                dirty.unlink()
+            except (OSError, ValueError):
+                if not self.warned:
+                    print('Batch history index could not be saved; recovery continues.', file=sys.stderr)
+                    self.warned = True
+                self._save()
 
     def publish(self, **fields):
         with self.lock:
             self.state.update(fields)
+            self.state['updated_at'] = timestamp()
+            self._save()
+
+    def add_execution_candidates(self, generated, confirmed, checkpointed):
+        with self.lock:
+            totals = self.state.setdefault('execution_candidates',
+                                           {'generated': 0, 'confirmed': 0 if confirmed is not None else None,
+                                            'checkpointed': 0 if checkpointed is not None else None})
+            totals['generated'] += max(0, generated)
+            for key, value in [('confirmed', confirmed), ('checkpointed', checkpointed)]:
+                totals[key] = totals[key] + max(0, value) if totals[key] is not None and value is not None else None
             self.state['updated_at'] = timestamp()
             self._save()
 
@@ -105,6 +149,7 @@ class BatchMonitor:
             state = 'failed'
         else:
             state = 'completed'
+        self.state['ended_at'] = timestamp()
         self.update(state)
         if state == 'failed':
             from .tools import ToolError

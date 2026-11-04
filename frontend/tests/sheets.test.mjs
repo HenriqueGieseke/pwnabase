@@ -4,7 +4,7 @@ import { mkdtemp, mkdir, writeFile, rename, unlink, symlink, rm, readFile } from
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createStore, SHEETS } from '../server/utils/sheets.mjs'
-import { readBatchStatus, readBatchConfigurations } from '../server/utils/batch-status.mjs'
+import { readBatchStatus, readBatchConfigurations, readBatchHistory } from '../server/utils/batch-status.mjs'
 import { readBatchEvents } from '../server/utils/batch-events.mjs'
 import { createEventQueue } from '../app/utils/event-queue.mjs'
 
@@ -55,6 +55,69 @@ test('batch configurations group identical identities and number changed content
   assert.equal(groups[0].latest.run_id, 'b'.repeat(32))
   assert.equal(groups[1].label, 'words 2')
   assert.equal(groups[2].label, 'words 3')
+})
+
+test('run history pages remain stable when new runs arrive', async t => {
+  const { root, put } = await fixture(t)
+  const config = 'a'.repeat(64)
+  const record = i => ({ schema_version: 1, run_id: i.toString(16).padStart(32, '0'),
+    configuration_id: config, source_label: 'words', mode: 'wordlist', rule_label: null,
+    state: 'completed', started_at: new Date(Date.UTC(2026, 0, 1, 0, 0, i)).toISOString(),
+    ended_at: new Date(Date.UTC(2026, 0, 1, 0, 0, i + 1)).toISOString(),
+    updated_at: new Date(Date.UTC(2026, 0, 1, 0, 0, i + 1)).toISOString(), password: 'synthetic-secret' })
+  for (let i = 0; i < 25; i++) {
+    const item = record(i)
+    await put(`.pwnabase/batch-runs/${item.run_id}.json`, item)
+  }
+  const first = await readBatchHistory(root, config)
+  assert.equal(first.runs.length, 20)
+  assert.ok(first.storage_bytes > 0)
+  const extra = record(25)
+  await put(`.pwnabase/batch-runs/${extra.run_id}.json`, extra)
+  const older = await readBatchHistory(root, config, first.before)
+  assert.equal(older.runs.length, 5)
+  assert.equal(older.before, null)
+  assert.equal(older.runs[0].run_id, record(4).run_id)
+  assert.ok(!JSON.stringify(first).includes('synthetic-secret'))
+  assert.deepEqual((await readBatchHistory(root, '../private')).runs, [])
+})
+
+test('indexed run history reads bounded pages and keeps cursors stable', async t => {
+  const { root, put } = await fixture(t)
+  const config = 'f'.repeat(64)
+  const runId = i => i.toString(16).padStart(32, '0')
+  const index = join(root, '.pwnabase', 'batch-index')
+  await mkdir(index, { recursive: true })
+  await put(`.pwnabase/batch-index/${config}.json`, { configuration_id: config, source_label: 'words',
+    mode: 'wordlist', rule_label: null, started_at: '2026-01-01T00:00:00Z' })
+  const record = i => ({ schema_version: 1, run_id: runId(i), configuration_id: config,
+    source_label: 'words', mode: 'wordlist', rule_label: null, state: 'completed',
+    started_at: new Date(Date.UTC(2026, 0, 1, 0, 0, i)).toISOString(),
+    updated_at: new Date(Date.UTC(2026, 0, 1, 0, 0, i + 1)).toISOString() })
+  for (let i = 0; i < 45; i++) await put(`.pwnabase/batch-runs/${runId(i)}.json`, record(i))
+  const indexPath = join(index, `${config}.idx`)
+  await writeFile(indexPath, Array.from({ length: 45 }, (_, i) => runId(i) + '\n').join(''))
+  const first = await readBatchHistory(root, config)
+  assert.equal(first.runs.length, 20)
+  assert.equal(first.runs[0].run_id, runId(44))
+  assert.match(first.before, /^\d{1,15}:[a-f0-9]{32}$/)
+  await put(`.pwnabase/batch-runs/${runId(45)}.json`, record(45))
+  await writeFile(indexPath, runId(45) + '\n', { flag: 'a' })
+  const older = await readBatchHistory(root, config, first.before)
+  assert.equal(older.runs[0].run_id, runId(24))
+  assert.equal(older.runs.length, 20)
+  assert.ok(first.storage_bytes > 0)
+  assert.equal((await readBatchConfigurations(root))[0].latest.run_id, runId(45))
+  await put(`.pwnabase/batch-runs/${runId(46)}.json`, record(46))
+  await put('.pwnabase/batch-index-dirty', { needs_rebuild: true })
+  assert.equal((await readBatchHistory(root, config, first.before)).reset, true)
+  assert.equal((await readBatchHistory(root, config)).runs[0].run_id, runId(46))
+  assert.equal((await readBatchConfigurations(root))[0].latest.run_id, runId(46))
+  const legacyCursor = (await readBatchHistory(root, config)).before
+  await unlink(join(root, '.pwnabase', 'batch-index-dirty'))
+  assert.equal((await readBatchHistory(root, config, legacyCursor)).reset, true)
+  await writeFile(indexPath, Array.from({ length: 46 }, (_, i) => runId(i + 1) + '\n').join(''))
+  assert.equal((await readBatchHistory(root, config, first.before)).reset, true)
 })
 
 test('batch events page backwards without leaking fields or duplicating newer writes', async t => {

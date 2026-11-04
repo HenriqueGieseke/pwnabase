@@ -16,6 +16,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from pwnabase import candidates, storage, tools, workflow
 from pwnabase.config import RunConfig, ROOT
+from pwnabase.monitor import BatchMonitor
 
 
 class WorkflowTests(unittest.TestCase):
@@ -113,6 +114,74 @@ else:
         self.assertNotEqual(first['configuration_id'], third['configuration_id'])
         runs = list((output / '.pwnabase/batch-runs').glob('*.json'))
         self.assertEqual(len(runs), 3)
+
+    def test_completed_run_history_has_end_time_and_execution_totals(self):
+        (self.captures / 'capture.pcap').write_text(tools.synthetic_record() + '\n')
+        output = self.root / 'out'
+        result = subprocess.run(self.command(output) + ['--ssid-rules', 'light'],
+                                capture_output=True, text=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        record = json.loads(next((output / '.pwnabase/batch-runs').glob('*.json')).read_text())
+        self.assertTrue(record['ended_at'])
+        self.assertEqual(record['outcomes']['recovered'], 1)
+        self.assertGreater(record['execution_candidates']['generated'], 0)
+        self.assertFalse(record['resumed_any'])
+
+    def test_history_index_preserves_runs_created_before_indexing(self):
+        output = self.root / 'out'
+        first = subprocess.run(self.command(output), capture_output=True, text=True, timeout=20)
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        first_status = json.loads((output / '.pwnabase/batch-status.json').read_text())
+        # Model records produced by an older version before an index existed.
+        import shutil
+        shutil.rmtree(output / '.pwnabase/batch-index')
+        second = subprocess.run(self.command(output), capture_output=True, text=True, timeout=20)
+        self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+        second_status = json.loads((output / '.pwnabase/batch-status.json').read_text())
+        index = output / '.pwnabase/batch-index' / (first_status['configuration_id'] + '.idx')
+        self.assertEqual(index.read_text().splitlines(), [first_status['run_id'], second_status['run_id']])
+        # A process interrupted while appending must not corrupt subsequent entries.
+        with index.open('ab') as stream:
+            stream.write(b'partial')
+        third = subprocess.run(self.command(output), capture_output=True, text=True, timeout=20)
+        self.assertEqual(third.returncode, 0, third.stdout + third.stderr)
+        third_status = json.loads((output / '.pwnabase/batch-status.json').read_text())
+        self.assertEqual(index.read_text().splitlines(),
+                         [first_status['run_id'], second_status['run_id'], third_status['run_id']])
+
+    def test_history_index_recovers_after_append_failure(self):
+        runtime = self.root / 'runtime'
+        runtime.mkdir()
+        first = BatchMonitor(runtime)
+        with patch('pwnabase.storage.append_batch_index', side_effect=OSError('synthetic error')):
+            with contextlib.redirect_stderr(io.StringIO()):
+                first.configure('wordlist', {'sha256': 'a' * 64, 'label': 'test'}, None, None)
+        self.assertTrue((runtime / 'batch-index-dirty').exists())
+        self.assertTrue((runtime / 'batch-runs' / (first.state['run_id'] + '.json')).exists())
+        second = BatchMonitor(runtime)
+        second.configure('wordlist', {'sha256': 'a' * 64, 'label': 'test'}, None, None)
+        index = runtime / 'batch-index' / (first.state['configuration_id'] + '.idx')
+        self.assertEqual(index.read_text().splitlines(), [first.state['run_id'], second.state['run_id']])
+        self.assertFalse((runtime / 'batch-index-dirty').exists())
+
+    def test_history_retries_when_marker_creation_temporarily_fails(self):
+        runtime = self.root / 'runtime'
+        runtime.mkdir()
+        monitor = BatchMonitor(runtime)
+        original = storage.atomic_json
+        attempts = 0
+        def fail_marker_once(path, value):
+            nonlocal attempts
+            if path.name == 'batch-index-dirty' and attempts == 0:
+                attempts += 1
+                raise OSError('synthetic error')
+            return original(path, value)
+        with patch('pwnabase.storage.atomic_json', side_effect=fail_marker_once):
+            with contextlib.redirect_stderr(io.StringIO()):
+                monitor.configure('wordlist', {'sha256': 'a' * 64, 'label': 'test'}, None, None)
+        index = runtime / 'batch-index' / (monitor.state['configuration_id'] + '.idx')
+        self.assertEqual(index.read_text().splitlines(), [monitor.state['run_id']])
+        self.assertTrue((runtime / 'batch-runs' / (monitor.state['run_id'] + '.json')).exists())
 
     def test_batch_configurations_distinguish_modes_and_rule_behavior(self):
         output = self.root / 'out'
@@ -221,6 +290,8 @@ else:
         status = json.loads((output / '.pwnabase/batch-status.json').read_text())
         self.assertGreater(status['generated_candidates'], 0)
         self.assertIsNone(status['wordlist_position'])
+        self.assertEqual(status['execution_candidates']['confirmed'], status['generated_candidates'])
+        self.assertIsNone(status['execution_candidates']['checkpointed'])
 
     def test_live_hashcat_invocation_progress_contains_only_safe_numbers(self):
         (self.captures / 'capture.pcap').write_text(tools.synthetic_record() + '\n')
@@ -471,9 +542,12 @@ else:
         self.assertEqual(success['candidate_generation']['source_complete'], True)
         status = json.loads((output / '.pwnabase/batch-status.json').read_text())
         self.assertTrue(status['resumed'])
+        self.assertTrue(status['resumed_any'])
         self.assertEqual(status['generated_candidates'], 76_800)
         self.assertEqual(status['hashcat_confirmed_candidates'], 69_120)
         self.assertEqual(status['checkpointed_candidates'], 69_120)
+        self.assertEqual(status['execution_candidates']['generated'], 7_680)
+        self.assertEqual(status['execution_candidates']['confirmed'], 0)
         self.assertEqual(list((output / 'tool-error').glob('*.json')), [])
 
     def test_bad_checkpoints_are_preserved_and_other_records_continue(self):

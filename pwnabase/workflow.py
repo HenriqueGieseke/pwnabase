@@ -384,6 +384,8 @@ def process_capture(path, context, counts):
         error = store.path('tool-error', f'record-{record_id}')
         outcome = AttemptResult()
         generation = None
+        baseline = {'generated_candidates': 0, 'hashcat_confirmed_candidates': 0,
+                    'checkpointed_candidates': 0}
         try:
             # Content identity survives renaming a wordlist or its parent folder.
             previous_path, previous = store.previous_attempt(record_id, attempt_key, label)
@@ -409,6 +411,10 @@ def process_capture(path, context, counts):
                               f'(wordlist {wordinfo["sha256"][:12]}, profile {rules_info["sha256"][:12]}); '
                               f'previous checkpoint backed up to {backup}.', flush=True)
                 checkpoint = storage.read_checkpoint(checkpoint_path, checkpoint_identity)
+                if checkpoint:
+                    baseline = {key: checkpoint[key] for key in baseline}
+                    if context.monitor and checkpoint['confirmed_batches']:
+                        context.monitor.publish(resumed_any=True)
             print(f'\n  [Recovery] Attempt {record_id[:12]}: SSID={json.dumps(record["ssid"])} BSSID={record["bssid"]}', flush=True)
             attempt_started = time.monotonic()
             attempt_record(record, context, outcome, checkpoint_path,
@@ -447,6 +453,15 @@ def process_capture(path, context, counts):
             print(f'  Record {record_id[:12]}: {exc}; continuing with remaining inputs.', file=sys.stderr, flush=True)
         finally:
             if context.monitor:
+                if outcome.generation and (wordlist_profile or ssid_mode):
+                    generated = outcome.generation.get('generated_candidates', outcome.generation.get('eligible', 0))
+                    confirmed = (outcome.generation.get('hashcat_confirmed_candidates', 0) - baseline['hashcat_confirmed_candidates']
+                                 if wordlist_profile else generated if outcome.status in {'candidates_exhausted', 'no_eligible_candidates'} else None)
+                    saved = (outcome.generation.get('checkpointed_candidates', 0) - baseline['checkpointed_candidates']
+                             if wordlist_profile else None)
+                    context.monitor.add_execution_candidates(
+                        generated - baseline['generated_candidates'],
+                        confirmed, saved)
                 context.monitor.publish(outcomes=_outcomes(counts))
 
     return len(records)
