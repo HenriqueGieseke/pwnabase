@@ -13,6 +13,7 @@ from dataclasses import replace
 import hashlib
 import hmac
 import json
+import math
 from pathlib import Path
 import re
 import shutil
@@ -28,7 +29,7 @@ class ToolError(Exception):
     """A tool or its candidate producer could not complete the operation."""
 
 
-def run_tool(command, env, cwd, timeout=None, stdin_source=None):
+def run_tool(command, env, cwd, timeout=None, stdin_source=None, progress_callback=None):
     # A separate process group lets Ctrl+C stop the tool and any workers.
     with tempfile.TemporaryFile() as output:
         process = subprocess.Popen(command, stdin=subprocess.PIPE if stdin_source else subprocess.DEVNULL, stdout=output,
@@ -52,6 +53,9 @@ def run_tool(command, env, cwd, timeout=None, stdin_source=None):
                 except BrokenPipeError:
                     pass
         interval = float(env.get('PWNABASE_PROGRESS_INTERVAL', '0'))
+        log_progress = interval > 0
+        if progress_callback and interval <= 0:
+            interval = 5
         def progress():
             position = 0
             pending = ""
@@ -73,16 +77,28 @@ def run_tool(command, env, cwd, timeout=None, stdin_source=None):
                     done, total = latest.get('progress', [0, 0])[:2]
                     devices = latest.get('devices')
                     devices = devices if isinstance(devices, list) else []
-                    speed = sum(d.get('speed', 0) for d in devices if isinstance(d, dict) and isinstance(d.get('speed', 0), (int, float)))
+                    speeds = [d['speed'] for d in devices if isinstance(d, dict)
+                              and isinstance(d.get('speed'), (int, float)) and math.isfinite(d['speed'])
+                              and d['speed'] >= 0]
+                    speed = sum(speeds) if speeds else None
                     remaining = (total - done) / speed if speed and total >= done and total > 0 and not stdin_source else None
+                    if progress_callback and all(math.isfinite(value) and value >= 0 for value in (done, total)):
+                        report = {'done': done, 'total': total}
+                        if speed is not None and math.isfinite(speed):
+                            report['speed'] = speed
+                        if remaining is not None and math.isfinite(remaining):
+                            report['eta_seconds'] = remaining
+                        progress_callback(report)
                     rejected = latest.get('rejected')
                     rejected = rejected if isinstance(rejected, (int, float)) else 'unavailable'
                     eta = f'{remaining:.0f}s' if remaining is not None else 'unavailable'
-                    print(f'  Progress {done}/{total}; {speed:.0f} H/s; '
-                          f'rejected={rejected}; elapsed={time.monotonic() - started:.0f}s; estimated remaining={eta}', flush=True)
-                else:
+                    if log_progress:
+                        speed_text = f'{speed:.0f}' if speed is not None else 'unavailable'
+                        print(f'  Progress {done}/{total}; {speed_text} H/s; '
+                              f'rejected={rejected}; elapsed={time.monotonic() - started:.0f}s; estimated remaining={eta}', flush=True)
+                elif log_progress:
                     print('  Hashcat running; waiting for its next progress report (startup may compile kernels).', flush=True)
-                if stdin_source:
+                if stdin_source and log_progress:
                     print(f'  Wordlist generation: {stdin_source.stats["seeds"]} seeds; '
                           f'{stdin_source.stats["eligible"]} eligible candidates generated (per-seed deduplication).', flush=True)
         started = time.monotonic()
@@ -162,7 +178,8 @@ def validate_rules(options, rules_info, env, work):
           f'fingerprint {rules_info["sha256"][:12]}', flush=True)
 
 
-def recover(record, wordlist, options, env, work, use_rules=True, hex_wordlist=False, candidate_stream=None):
+def recover(record, wordlist, options, env, work, use_rules=True, hex_wordlist=False, candidate_stream=None,
+            progress_callback=None):
     hashes, recovered = work / 'input.22000', work / 'recovered.hex'
     hashes.write_text(record['hashcat_record'] + '\n', encoding='ascii')
     recovered.unlink(missing_ok=True)
@@ -181,7 +198,8 @@ def recover(record, wordlist, options, env, work, use_rules=True, hex_wordlist=F
     if candidate_stream is not None:
         command.append('--stdin-timeout-abort=0')
     if candidate_stream is None:
-        code, diagnostic = run_tool(command, env, work)
+        code, diagnostic = (run_tool(command, env, work, progress_callback=progress_callback)
+                            if progress_callback else run_tool(command, env, work))
     else:
         code, diagnostic = run_tool(command, env, work, stdin_source=candidate_stream)
     if code not in (0, 1):

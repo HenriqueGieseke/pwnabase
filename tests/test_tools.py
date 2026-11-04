@@ -92,6 +92,17 @@ class ToolExecutionTests(unittest.TestCase):
             tools.run_tool(command, env, self.work)
         self.assertEqual(output.getvalue(), '')
 
+    def test_missing_device_speed_is_reported_as_unknown(self):
+        command = [sys.executable, '-c',
+                   'import time; print(\'{"progress":[1,10],"devices":[]}\', flush=True); time.sleep(.15)', '-m']
+        env = os.environ.copy()
+        env['PWNABASE_PROGRESS_INTERVAL'] = '0.03'
+        reports = []
+        with contextlib.redirect_stdout(io.StringIO()):
+            code, _ = tools.run_tool(command, env, self.work, progress_callback=reports.append)
+        self.assertEqual(code, 0)
+        self.assertEqual(reports, [{'done': 1, 'total': 10}])
+
     def test_broken_pipe_when_consumer_finishes_early_does_not_hang(self):
         class Source:
             stats = {'seeds': 0, 'eligible': 0}

@@ -60,6 +60,27 @@ class BatchContext:
     wordlist: Path | None
     wordinfo: dict | None
     stats: RunStats = field(default_factory=RunStats)
+    monitor: BatchMonitor | None = None
+
+
+def _outcomes(counts):
+    return {
+        'recovered': counts['recovered'],
+        'exhausted': counts['wordlist_exhausted'] + counts['candidates_exhausted'] + counts['no_eligible_candidates'],
+        'skipped': sum(value for key, value in counts.items() if key.startswith('skipped_')),
+        'unusable': counts['no_usable_handshake'],
+        'failed': counts['tool_error'],
+    }
+
+
+def _recover(record, wordlist, context, **kwargs):
+    if context.monitor:
+        kwargs['progress_callback'] = lambda report: context.monitor.publish(hashcat=report)
+    try:
+        return tools.recover(record, wordlist, context.tools, context.env, context.work, **kwargs)
+    finally:
+        if context.monitor:
+            context.monitor.publish(hashcat=None)
 
 
 def _checkpoint_age(checkpoint):
@@ -139,6 +160,14 @@ def _recover_transformed_wordlist(record, context, stream, checkpoint_path,
     base_generated_candidates = checkpoint['generated_candidates']
     base_confirmed_candidates = checkpoint['hashcat_confirmed_candidates']
     base_confirmed_batches = checkpoint['confirmed_batches']
+    if context.monitor:
+        context.monitor.publish(resumed=bool(checkpoint['confirmed_batches']),
+                                source_words=base_generation['seeds'],
+                                wordlist_position=checkpoint['cursor']['byte_offset'],
+                                wordlist_size=stream.path.stat().st_size,
+                                generated_candidates=base_generated_candidates,
+                                hashcat_confirmed_candidates=base_confirmed_candidates,
+                                checkpointed_candidates=checkpoint['checkpointed_candidates'])
     if checkpoint['source_complete']:
         print('  Saved checkpoint shows the candidate source is complete; finalizing the attempt.',
               flush=True)
@@ -156,15 +185,26 @@ def _recover_transformed_wordlist(record, context, stream, checkpoint_path,
     confirmed_this_run = 0
     while True:
         batch_started = time.monotonic()
+        if context.monitor:
+            context.monitor.publish(hashcat=None)
         stop_progress = threading.Event()
         def generation_progress():
-            while not stop_progress.wait(context.config.progress_interval):
-                print(f'  Generating (completed source words): '
-                      f'{base_generated_candidates + stream.stats["eligible"]:,} candidates; '
-                      f'Hashcat-confirmed: {progress["hashcat_confirmed_candidates"]:,}; '
-                      f'checkpointed: {checkpoint["checkpointed_candidates"]:,}.', flush=True)
+            interval = context.config.progress_interval
+            tick = min(5, interval) if interval else 5
+            last_log = time.monotonic()
+            while not stop_progress.wait(tick):
+                if context.monitor:
+                    context.monitor.publish(source_words=base_generation['seeds'] + stream.stats['seeds'],
+                                            wordlist_position=stream.cursor,
+                                            generated_candidates=base_generated_candidates + stream.stats['eligible'])
+                if interval and time.monotonic() - last_log >= interval:
+                    print(f'  Generating (completed source words): '
+                          f'{base_generated_candidates + stream.stats["eligible"]:,} candidates; '
+                          f'Hashcat-confirmed: {progress["hashcat_confirmed_candidates"]:,}; '
+                          f'checkpointed: {checkpoint["checkpointed_candidates"]:,}.', flush=True)
+                    last_log = time.monotonic()
         reporter = None
-        if context.config.progress_interval:
+        if context.config.progress_interval or context.monitor:
             reporter = threading.Thread(target=generation_progress, daemon=True)
             reporter.start()
         try:
@@ -176,10 +216,18 @@ def _recover_transformed_wordlist(record, context, stream, checkpoint_path,
         if batch is None:
             if not stream.stats['source_complete']:
                 raise ToolError('Candidate source ended before generation completed')
+            if context.monitor:
+                context.monitor.publish(source_words=base_generation['seeds'] + stream.stats['seeds'],
+                                        wordlist_position=stream.cursor,
+                                        generated_candidates=base_generated_candidates + stream.stats['eligible'])
             return None
         try:
-            password = tools.recover(record, batch.path, context.tools, context.env,
-                                     context.work, use_rules=False, hex_wordlist=True)
+            if context.monitor:
+                context.monitor.publish(source_words=base_generation['seeds'] + stream.stats['seeds'],
+                                        wordlist_position=batch.next_offset,
+                                        generated_candidates=base_generated_candidates + stream.stats['eligible'],
+                                        hashcat=None)
+            password = _recover(record, batch.path, context, use_rules=False, hex_wordlist=True)
             elapsed = max(time.monotonic() - batch_started, 0.001)
             if password is not None:
                 print(f'  Recovered in candidate batch {batch_number + 1} after '
@@ -192,6 +240,8 @@ def _recover_transformed_wordlist(record, context, stream, checkpoint_path,
             hashcat_confirmed = (base_confirmed_candidates + confirmed_this_run
                                  + batch.candidate_count)
             progress['hashcat_confirmed_candidates'] = hashcat_confirmed
+            if context.monitor:
+                context.monitor.publish(hashcat_confirmed_candidates=hashcat_confirmed)
             batch_number += 1
             updated = {
                 'schema_version': 1,
@@ -208,6 +258,9 @@ def _recover_transformed_wordlist(record, context, stream, checkpoint_path,
             storage.atomic_json(checkpoint_path, updated)
             checkpoint.clear()
             checkpoint.update(updated)
+            if context.monitor:
+                context.monitor.publish(hashcat_confirmed_candidates=hashcat_confirmed,
+                                        checkpointed_candidates=hashcat_confirmed)
             confirmed_this_run += batch.candidate_count
             print(f'  Candidate batch {batch_number} complete: {batch.candidate_count:,} candidates; '
                   f'Hashcat confirmed exhaustion and checkpointed progress in {elapsed:.1f}s total.',
@@ -226,6 +279,8 @@ def attempt_record(record, context, outcome, checkpoint_path=None,
     work, env, wordlist = context.work, context.env, context.wordlist
     if context.config.ssid:
         generated, outcome.generation = candidates.generate(bytes.fromhex(record['ssid_hex']), context.candidates.ssid_config)
+        if context.monitor:
+            context.monitor.publish(generated_candidates=len(generated))
         print('  SSID candidate counts: ' + json.dumps(outcome.generation, sort_keys=True), flush=True)
         if not outcome.generation['valid_utf8']:
             print('  SSID is not valid UTF-8; testing exact bytes only, without text transformations.', flush=True)
@@ -233,7 +288,7 @@ def attempt_record(record, context, outcome, checkpoint_path=None,
         with candidate_file.open('w', encoding='ascii') as stream:
             for candidate in generated:
                 stream.write(candidate.hex() + '\n')
-        outcome.password = tools.recover(record, candidate_file, context.tools, env, work, use_rules=False, hex_wordlist=True) if generated else None
+        outcome.password = _recover(record, candidate_file, context, use_rules=False, hex_wordlist=True) if generated else None
         outcome.status = ('recovered' if outcome.password is not None else
                   'candidates_exhausted' if generated else 'no_eligible_candidates')
     elif context.candidates.wordlist_profile:
@@ -273,7 +328,7 @@ def attempt_record(record, context, outcome, checkpoint_path=None,
         outcome.status = ('recovered' if outcome.password is not None else
                   'no_eligible_candidates' if not outcome.generation['eligible'] else 'wordlist_exhausted')
     else:
-        outcome.password = tools.recover(record, wordlist, context.tools, env, work)
+        outcome.password = _recover(record, wordlist, context)
         outcome.status = 'recovered' if outcome.password is not None else 'wordlist_exhausted'
 
 
@@ -309,6 +364,11 @@ def process_capture(path, context, counts):
         return 0
     store.clear(no_usable)
     for record_id, record in records.items():
+        if context.monitor:
+            context.monitor.publish(ssid=record['ssid'], bssid=record['bssid'], hashcat=None,
+                                    resumed=False, generated_candidates=None,
+                                    hashcat_confirmed_candidates=None, checkpointed_candidates=None,
+                                    source_words=None, wordlist_position=None, wordlist_size=None)
         success = store.path('complete', record_id)
         rules_info = prepared.rules_info
         ssid_mode = config.ssid
@@ -373,6 +433,9 @@ def process_capture(path, context, counts):
             storage.atomic_json(error, result)
             counts['tool_error'] += 1
             print(f'  Record {record_id[:12]}: {exc}; continuing with remaining inputs.', file=sys.stderr, flush=True)
+        finally:
+            if context.monitor:
+                context.monitor.publish(outcomes=_outcomes(counts))
 
     return len(records)
 
@@ -471,9 +534,15 @@ def run(config):
                 captures = sorted(p for p in config.handshakes.iterdir()
                                   if p.is_file() and p.suffix.lower() in EXTENSIONS)
                 print(f'Found {len(captures)} captures; source: {"each record’s SSID" if config.ssid else config.wordlist.name}.', flush=True)
-                context = BatchContext(config, prepared, tool_config, env, work, wordlist, wordinfo, stats)
+                context = BatchContext(config, prepared, tool_config, env, work, wordlist, wordinfo, stats, monitor)
+                monitor.publish(capture_total=len(captures), capture_index=0, capture_name=None,
+                                outcomes=_outcomes(counts))
                 for index, path in enumerate(captures, 1):
                     stats.captures_visited += 1
+                    monitor.publish(capture_index=index, capture_name=path.name, ssid=None, bssid=None,
+                                    hashcat=None, resumed=False, generated_candidates=None,
+                                    hashcat_confirmed_candidates=None, checkpointed_candidates=None,
+                                    source_words=None, wordlist_position=None, wordlist_size=None)
                     print(f'[{index}/{len(captures)}] {path.name}', flush=True)
                     try:
                         process_capture(path, context, counts)
@@ -494,6 +563,7 @@ def run(config):
                     else:
                         error_id = hashlib.sha256(str(path).encode()).hexdigest()
                         store.clear(store.path('tool-error', f'path-{error_id}'))
+                    monitor.publish(outcomes=_outcomes(counts))
                 print(f'Batch elapsed: {time.monotonic() - batch_started:.1f}s; captures visited: {len(captures)}', flush=True)
                 print(f'Authentication records encountered: {stats.records_seen} (including duplicates across captures).', flush=True)
                 for label, key in [('Recovered records', 'recovered'), ('Exhausted wordlist records', 'wordlist_exhausted'), ('Exhausted SSID records', 'candidates_exhausted'), ('No eligible candidates', 'no_eligible_candidates'), ('Unusable captures', 'no_usable_handshake'), ('Skipped recovered records', 'skipped_recovered'), ('Skipped exhausted wordlist records', 'skipped_wordlist_exhausted'), ('Skipped exhausted SSID records', 'skipped_candidates_exhausted'), ('Skipped no-eligible-candidate records', 'skipped_no_eligible_candidates'), ('Skipped unusable captures', 'skipped_unusable'), ('Capture or record errors', 'tool_error')]:

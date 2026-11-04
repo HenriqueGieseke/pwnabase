@@ -57,6 +57,12 @@ class BatchMonitor:
             self.state['updated_at'] = timestamp()
             self._save()
 
+    def publish(self, **fields):
+        with self.lock:
+            self.state.update(fields)
+            self.state['updated_at'] = timestamp()
+            self._save()
+
     def __enter__(self):
         self.update('starting')
         def heartbeat():

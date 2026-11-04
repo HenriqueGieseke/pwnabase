@@ -12,11 +12,18 @@ test('batch status is read-only, filtered and detects stale runs', async t => {
   const file = await put('.pwnabase/batch-status.json', {
     schema_version: 1, run_id: 'a'.repeat(32), state: 'running',
     started_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:10Z',
+    capture_index: 2, capture_total: 4, ssid: 'Synthetic network', bssid: '02:00:00:00:00:01',
+    generated_candidates: 100, hashcat_confirmed_candidates: 75, checkpointed_candidates: 50,
+    hashcat: { done: 5, total: 10, speed: 2, eta_seconds: 3, password: 'synthetic-secret' },
     password: 'synthetic-secret',
   })
   const before = await readFile(file, 'utf8')
   const status = await readBatchStatus(root, Date.parse('2026-01-01T00:01:00Z'))
   assert.equal(status.state, 'unknown')
+  assert.equal(status.generated_candidates, 100)
+  assert.equal(status.hashcat_confirmed_candidates, 75)
+  assert.equal(status.checkpointed_candidates, 50)
+  assert.deepEqual(status.hashcat, { done: 5, total: 10, speed: 2, eta_seconds: 3 })
   assert.equal((await readBatchStatus(root, Date.parse('2026-01-01T00:00:20Z'))).state, 'running')
   assert.equal((await readBatchStatus(root, Date.parse('2026-01-01T00:00:40Z'))).state, 'running')
   assert.ok(!JSON.stringify(status).includes('synthetic-secret'))

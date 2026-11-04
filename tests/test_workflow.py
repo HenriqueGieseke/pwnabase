@@ -28,7 +28,7 @@ class WorkflowTests(unittest.TestCase):
         self.words = self.root / 'words.txt'
         self.words.write_bytes(b'testpass123\n')
         self.tool = self.root / 'fixture-tool'
-        self.tool.write_text('#!' + sys.executable + '\n' + '''import hashlib, os, pathlib, sys, time
+        self.tool.write_text('#!' + sys.executable + '\n' + '''import hashlib, json, os, pathlib, sys, time
 args = sys.argv[1:]
 if '--version' in args:
     print('synthetic tool 1')
@@ -61,6 +61,9 @@ else:
         if os.environ.get('PWNABASE_TEST_BLOCK_HASHCAT_CALL') == str(count):
             pathlib.Path(os.environ['PWNABASE_TEST_HASHCAT_MARKER']).write_text(str(count))
             time.sleep(30)
+    if os.environ.get('PWNABASE_TEST_PROGRESS') and not any('self-test.txt' in arg for arg in args):
+        print(json.dumps({'progress': [25, 100], 'devices': [{'speed': 5}], 'password': 'must-not-leak'}), flush=True)
+        time.sleep(float(os.environ.get('PWNABASE_TEST_PROGRESS_DURATION', '3')))
     outfile = pathlib.Path(args[args.index('--outfile') + 1])
     lines = pathlib.Path(args[args.index('--outfile') + 3]).read_bytes().splitlines()
     words = [bytes.fromhex(line.decode()) for line in lines] if '--hex-wordlist' in args else lines
@@ -148,6 +151,103 @@ else:
         status = json.loads((runtime / 'batch-status.json').read_text())
         self.assertEqual(status['state'], 'completed')
         self.assertIn('configuration_id', status)
+
+    def test_batch_status_reports_capture_record_and_execution_outcomes(self):
+        (self.captures / 'capture.pcap').write_text(tools.synthetic_record() + '\n')
+        output = self.root / 'out'
+        result = subprocess.run(self.command(output), capture_output=True, text=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        status = json.loads((output / '.pwnabase/batch-status.json').read_text())
+        self.assertEqual(status['capture_index'], 1)
+        self.assertEqual(status['capture_total'], 1)
+        self.assertEqual(status['capture_name'], 'capture.pcap')
+        self.assertEqual(status['ssid'], 'pwnabase-self-test')
+        self.assertEqual(status['bssid'], '02:00:00:00:00:01')
+        self.assertEqual(status['outcomes']['recovered'], 1)
+        self.assertNotIn('testpass123', json.dumps(status))
+
+    def test_status_finishes_source_with_no_eligible_candidates(self):
+        (self.captures / 'capture.pcap').write_text(tools.synthetic_record() + '\n')
+        self.words.write_bytes(b'a\n')
+        output = self.root / 'out'
+        result = subprocess.run(self.command(output) + ['--ssid-rules', 'light'],
+                                capture_output=True, text=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        status = json.loads((output / '.pwnabase/batch-status.json').read_text())
+        self.assertEqual(status['source_words'], 1)
+        self.assertEqual(status['wordlist_position'], 2)
+        self.assertEqual(status['generated_candidates'], 0)
+        self.assertEqual(status['outcomes']['exhausted'], 1)
+
+    def test_ssid_mode_reports_generated_count_without_wordlist_position(self):
+        (self.captures / 'capture.pcap').write_text(tools.synthetic_record() + '\n')
+        output = self.root / 'out'
+        command = self.command(output)
+        index = command.index('--wordlist')
+        del command[index:index + 2]
+        result = subprocess.run(command + ['--ssid'], capture_output=True, text=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        status = json.loads((output / '.pwnabase/batch-status.json').read_text())
+        self.assertGreater(status['generated_candidates'], 0)
+        self.assertIsNone(status['wordlist_position'])
+
+    def test_live_hashcat_invocation_progress_contains_only_safe_numbers(self):
+        (self.captures / 'capture.pcap').write_text(tools.synthetic_record() + '\n')
+        output = self.root / 'out'
+        command = self.command(output)
+        command[command.index('--progress-interval') + 1] = '1'
+        env = os.environ.copy()
+        env['PWNABASE_TEST_PROGRESS'] = '1'
+        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
+        try:
+            path = output / '.pwnabase/batch-status.json'
+            deadline = time.monotonic() + 10
+            status = {}
+            while time.monotonic() < deadline and process.poll() is None:
+                if path.exists():
+                    status = json.loads(path.read_text())
+                    if status.get('hashcat'):
+                        break
+                time.sleep(.05)
+            self.assertEqual(status['hashcat'], {'done': 25, 'total': 100, 'speed': 5, 'eta_seconds': 15})
+            self.assertNotIn('must-not-leak', json.dumps(status))
+            stdout, stderr = process.communicate(timeout=10)
+            self.assertEqual(process.returncode, 0, stdout + stderr)
+        finally:
+            if process.poll() is None:
+                process.send_signal(signal.SIGINT)
+                process.communicate(timeout=10)
+            process.stdout.close()
+            process.stderr.close()
+
+    def test_frontend_progress_continues_when_terminal_progress_is_disabled(self):
+        (self.captures / 'capture.pcap').write_text(tools.synthetic_record() + '\n')
+        output = self.root / 'out'
+        env = os.environ.copy()
+        env.update(PWNABASE_TEST_PROGRESS='1', PWNABASE_TEST_PROGRESS_DURATION='10')
+        process = subprocess.Popen(self.command(output), stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE, text=True, env=env)
+        try:
+            path = output / '.pwnabase/batch-status.json'
+            deadline = time.monotonic() + 9
+            status = {}
+            while time.monotonic() < deadline and process.poll() is None:
+                if path.exists():
+                    status = json.loads(path.read_text())
+                    if status.get('hashcat'):
+                        break
+                time.sleep(.05)
+            self.assertEqual(status['hashcat']['done'], 25)
+            process.send_signal(signal.SIGINT)
+            stdout, stderr = process.communicate(timeout=10)
+            self.assertEqual(process.returncode, 130, stdout + stderr)
+            self.assertNotIn('Progress 25/100', stdout)
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.communicate(timeout=10)
+            process.stdout.close()
+            process.stderr.close()
 
     def test_batch_status_tracks_running_interruption_and_failed_preflight(self):
         (self.captures / 'capture.pcap').write_text('wait')
@@ -338,6 +438,11 @@ else:
         success = json.loads(next((output / 'complete').glob('*.json')).read_text())
         self.assertEqual(success['password'], 'testpass123')
         self.assertEqual(success['candidate_generation']['source_complete'], True)
+        status = json.loads((output / '.pwnabase/batch-status.json').read_text())
+        self.assertTrue(status['resumed'])
+        self.assertEqual(status['generated_candidates'], 76_800)
+        self.assertEqual(status['hashcat_confirmed_candidates'], 69_120)
+        self.assertEqual(status['checkpointed_candidates'], 69_120)
         self.assertEqual(list((output / 'tool-error').glob('*.json')), [])
 
     def test_bad_checkpoints_are_preserved_and_other_records_continue(self):

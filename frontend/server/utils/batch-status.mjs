@@ -28,6 +28,28 @@ async function readStatusFile(path, now) {
       Object.assign(result, { configuration_id: data.configuration_id, mode: data.mode,
         source_label: data.source_label, rule_label: data.rule_label })
     }
+    for (const key of ['capture_index', 'capture_total', 'source_words', 'wordlist_position', 'wordlist_size',
+      'generated_candidates', 'hashcat_confirmed_candidates', 'checkpointed_candidates']) {
+      if (Number.isSafeInteger(data[key]) && data[key] >= 0) result[key] = data[key]
+    }
+    for (const key of ['capture_name', 'ssid', 'bssid']) {
+      if (typeof data[key] === 'string' && data[key].length <= 512) result[key] = data[key]
+    }
+    if (typeof data.resumed === 'boolean') result.resumed = data.resumed
+    if (data.outcomes && typeof data.outcomes === 'object') {
+      const outcomes = {}
+      for (const key of ['recovered', 'exhausted', 'skipped', 'unusable', 'failed']) {
+        if (Number.isSafeInteger(data.outcomes[key]) && data.outcomes[key] >= 0) outcomes[key] = data.outcomes[key]
+      }
+      result.outcomes = outcomes
+    }
+    if (data.hashcat && typeof data.hashcat === 'object') {
+      const report = {}
+      for (const key of ['done', 'total', 'speed', 'eta_seconds']) {
+        if (typeof data.hashcat[key] === 'number' && Number.isFinite(data.hashcat[key]) && data.hashcat[key] >= 0) report[key] = data.hashcat[key]
+      }
+      result.hashcat = report
+    }
     return result
   } catch (error) {
     if (['ENOENT', 'ELOOP', 'ENOTDIR'].includes(error.code) || error instanceof SyntaxError) return null
