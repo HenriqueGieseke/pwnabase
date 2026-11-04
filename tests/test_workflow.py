@@ -78,6 +78,80 @@ else:
                 '--wordlist', str(self.words), '--output', str(output), '--hashcat', str(self.tool),
                 '--extractor', str(self.tool), '--device-types', '1', '--progress-interval', '0']
 
+    def test_batch_status_records_completed_run_without_secrets(self):
+        (self.captures / 'capture.pcap').write_text(tools.synthetic_record() + '\n')
+        output = self.root / 'out'
+        result = subprocess.run(self.command(output), capture_output=True, text=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        status = json.loads((output / '.pwnabase' / 'batch-status.json').read_text())
+        self.assertEqual(status['state'], 'completed')
+        self.assertTrue(status['updated_at'])
+        self.assertNotIn('testpass123', json.dumps(status))
+
+    def test_batch_status_tracks_running_interruption_and_failed_preflight(self):
+        (self.captures / 'capture.pcap').write_text('wait')
+        output = self.root / 'out'
+        status_path = output / '.pwnabase' / 'batch-status.json'
+        process = subprocess.Popen(self.command(output), stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE, text=True)
+        try:
+            deadline = time.monotonic() + 10
+            while not (self.root / 'blocked.pid').exists() and process.poll() is None and time.monotonic() < deadline:
+                time.sleep(.02)
+            self.assertTrue((self.root / 'blocked.pid').exists())
+            self.assertEqual(json.loads(status_path.read_text())['state'], 'running')
+            process.send_signal(signal.SIGINT)
+            process.communicate(timeout=10)
+            self.assertEqual(process.returncode, 130)
+            self.assertEqual(json.loads(status_path.read_text())['state'], 'interrupted')
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.communicate(timeout=10)
+            process.stdout.close()
+            process.stderr.close()
+        command = self.command(output)
+        command[command.index('--hashcat') + 1] = str(self.root / 'missing')
+        failed = subprocess.run(command, capture_output=True, text=True, timeout=20)
+        self.assertEqual(failed.returncode, 2)
+        self.assertEqual(json.loads(status_path.read_text())['state'], 'failed')
+
+    def test_batch_status_heartbeat_survives_long_operation_and_hard_stop(self):
+        (self.captures / 'capture.pcap').write_text('wait')
+        output = self.root / 'out'
+        status_path = output / '.pwnabase' / 'batch-status.json'
+        process = subprocess.Popen(self.command(output), stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE, text=True)
+        try:
+            deadline = time.monotonic() + 10
+            while not (self.root / 'blocked.pid').exists() and process.poll() is None and time.monotonic() < deadline:
+                time.sleep(.02)
+            self.assertTrue((self.root / 'blocked.pid').exists())
+            initial = json.loads(status_path.read_text())
+            deadline = time.monotonic() + 8
+            while time.monotonic() < deadline:
+                current = json.loads(status_path.read_text())
+                if current['updated_at'] != initial['updated_at']:
+                    break
+                time.sleep(.1)
+            self.assertNotEqual(current['updated_at'], initial['updated_at'])
+            self.assertEqual(current['state'], 'running')
+            process.kill()
+            process.communicate(timeout=10)
+            self.assertEqual(json.loads(status_path.read_text())['state'], 'running')
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.communicate(timeout=10)
+            marker = self.root / 'blocked.pid'
+            if marker.exists():
+                try:
+                    os.kill(int(marker.read_text()), signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+            process.stdout.close()
+            process.stderr.close()
+
     def test_direct_workflow_and_cli_preserve_results_and_reruns(self):
         (self.captures / 'capture.pcap').write_text(tools.synthetic_record() + '\n')
         direct_output, cli_output = self.root / 'direct', self.root / 'cli'

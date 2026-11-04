@@ -4,6 +4,32 @@ import { mkdtemp, mkdir, writeFile, rename, unlink, symlink, rm, readFile } from
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createStore, SHEETS } from '../server/utils/sheets.mjs'
+import { readBatchStatus } from '../server/utils/batch-status.mjs'
+
+test('batch status is read-only, filtered and detects stale runs', async t => {
+  const { root, put } = await fixture(t)
+  assert.equal(await readBatchStatus(root), null)
+  const file = await put('.pwnabase/batch-status.json', {
+    schema_version: 1, run_id: 'a'.repeat(32), state: 'running',
+    started_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:10Z',
+    password: 'synthetic-secret',
+  })
+  const before = await readFile(file, 'utf8')
+  const status = await readBatchStatus(root, Date.parse('2026-01-01T00:01:00Z'))
+  assert.equal(status.state, 'unknown')
+  assert.equal((await readBatchStatus(root, Date.parse('2026-01-01T00:00:20Z'))).state, 'running')
+  assert.equal((await readBatchStatus(root, Date.parse('2026-01-01T00:00:40Z'))).state, 'running')
+  assert.ok(!JSON.stringify(status).includes('synthetic-secret'))
+  assert.equal(await readFile(file, 'utf8'), before)
+  await writeFile(file, JSON.stringify({ schema_version: 1, run_id: 'a'.repeat(32), state: 'completed',
+    started_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:10Z' }))
+  assert.equal((await readBatchStatus(root, Date.parse('2026-02-01T00:00:00Z'))).state, 'completed')
+  await writeFile(file, '{bad')
+  assert.equal(await readBatchStatus(root), null)
+  await unlink(file)
+  await symlink(join(root, 'complete'), file)
+  assert.equal(await readBatchStatus(root), null)
+})
 
 async function fixture(t) {
   const root = await mkdtemp(join(tmpdir(), 'pwnabase-viewer-'))

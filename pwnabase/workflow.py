@@ -1,6 +1,7 @@
 """Sequential local workflow, independent of argument parsing and process exit."""
 
 from collections import Counter
+from contextlib import nullcontext
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 import fcntl
@@ -16,6 +17,7 @@ import threading
 import time
 
 from . import candidates, storage, tools
+from .monitor import BatchMonitor
 from .config import ROOT, RunConfig, ToolConfig
 from .tools import ToolError
 
@@ -415,7 +417,8 @@ def run(config):
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError as exc:
                 raise ToolError('Another batch is already using this output directory') from exc
-            with tempfile.TemporaryDirectory(prefix='work-', dir=runtime) as directory:
+            with (nullcontext(None) if config.check else BatchMonitor(runtime)) as monitor, \
+                    tempfile.TemporaryDirectory(prefix='work-', dir=runtime) as directory:
                 work = Path(directory).resolve()
                 env = os.environ.copy()
                 env.setdefault('RUSTICL_ENABLE', 'radeonsi')
@@ -453,6 +456,7 @@ def run(config):
                     print('Rules: none; testing original wordlist entries only.', flush=True)
                 if config.check:
                     return BatchResult(0, dict(counts), stats.records_seen, stats.captures_visited)
+                monitor.update('running')
                 if not config.handshakes.is_dir():
                     raise ToolError(f'Capture directory does not exist: {config.handshakes}')
                 if not config.ssid and wordlist is None:
@@ -491,6 +495,8 @@ def run(config):
                 for label, key in [('Recovered records', 'recovered'), ('Exhausted wordlist records', 'wordlist_exhausted'), ('Exhausted SSID records', 'candidates_exhausted'), ('No eligible candidates', 'no_eligible_candidates'), ('Unusable captures', 'no_usable_handshake'), ('Skipped recovered records', 'skipped_recovered'), ('Skipped exhausted wordlist records', 'skipped_wordlist_exhausted'), ('Skipped exhausted SSID records', 'skipped_candidates_exhausted'), ('Skipped no-eligible-candidate records', 'skipped_no_eligible_candidates'), ('Skipped unusable captures', 'skipped_unusable'), ('Capture or record errors', 'tool_error')]:
                     print(f'  {label}: {counts[key]}', flush=True)
                 print('Summary: ' + json.dumps(dict(counts), sort_keys=True), flush=True)
+                if counts['tool_error']:
+                    monitor.update('failed')
                 return BatchResult(1 if counts['tool_error'] else 0, dict(counts), stats.records_seen, stats.captures_visited)
     except KeyboardInterrupt:
         print('\nInterrupted. Completed results are saved. Transformed-wordlist attempts '
