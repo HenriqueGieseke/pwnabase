@@ -1,5 +1,16 @@
 # Pwnabase
 
+Pwnabase is a local learning project for exploring wireless security and
+cryptography through authorized WPA/WPA2 password recovery. It processes packet
+captures, including those collected by a Pwnagotchi, extracts authentication
+records, tests password candidates, and presents the results in a local
+spreadsheet-style viewer. The project is developed with AI assistance as a way
+to study the concepts and inspect their implementation.
+
+The [security study guide](docs/learning/pwnabase-security-study-guide.md)
+explains the workflow, tools, cryptography, and source code with practical
+exercises using synthetic or fictional data.
+
 The local spreadsheet viewer is started separately with `node frontend/start.mjs`.
 Open `http://127.0.0.1:3000`; recovery can keep running in its own terminal.
 See [viewer setup and behavior](frontend/README.md).
