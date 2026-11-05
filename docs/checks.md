@@ -6,6 +6,10 @@ The required stages are whitespace (staged and unstaged), Python compilation,
 ordinary Python tests, and frontend result-reader tests. No full Nuxt build or
 dependency installation is performed.
 
+GitHub Actions runs the same fast checks on Linux for pushes and pull requests,
+and can also be started manually. The workflow uses synthetic tests and does
+not enable the optional real-tool integrations or access local datasets.
+
 Use `./scripts/check --real-tools` explicitly at a recovery integration milestone.
 This enables the existing synthetic Hashcat/extractor integrations, which use
 small temporary wordlists and select CPU. Ordinary checks force those tests off,
@@ -69,5 +73,6 @@ terminal Ctrl+C delivered to Git's foreground process group. Signalling only the
 Git parent PID is not guaranteed by Git to forward cancellation to its hook.
 
 Git's standard hook bypass mechanisms remain available; local hooks prevent
-accidental mistakes, not deliberate bypass. No custom bypass flag, remote CI,
-branch protection or pull-request requirement is introduced.
+accidental mistakes, not deliberate bypass. The GitHub Actions workflow provides
+remote checks; no custom bypass flag, branch protection or pull-request
+requirement is introduced.
