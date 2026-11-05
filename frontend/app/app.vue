@@ -2,6 +2,7 @@
 import { createEventQueue } from './utils/event-queue.mjs'
 import { HIDDEN, loadPreferences, redactDetails, savePreferences } from './utils/privacy.mjs'
 const tabs = ['complete', 'exhausted', 'no-usable-handshake', 'tool-error', 'rules', 'batch-status']
+const demo = useRuntimeConfig().public.demo
 const titles = { complete: 'Complete', exhausted: 'Exhausted', 'no-usable-handshake': 'No usable handshake', 'tool-error': 'Tool errors', rules: 'Rules', 'batch-status': 'Batch status' }
 const descriptions = {
   complete: 'Verified recoveries, with the source and experiment that produced each result.',
@@ -298,6 +299,7 @@ const ruleObjects = computed(() => Array.isArray(detail.value?.data?.rules) ? de
 
     <main>
       <section class="sheet-shell" aria-label="Result sheets">
+        <p v-if="demo" class="notice" role="status">Demo: all displayed data is fictional.</p>
         <div class="sheet-title"><div><span class="sheet-icon" aria-hidden="true">▤</span><h1>{{ titles[active] }}</h1><span v-if="active !== 'batch-status'" class="count">{{ sheet?.total ?? '—' }} files</span></div><span class="file-type">{{ active === 'batch-status' ? 'LOCAL BATCH' : 'JSON COLLECTION' }}</span></div>
         <p class="sheet-description">{{ descriptions[active] }}</p>
         <div v-if="active === 'batch-status'" class="batch-status" aria-live="polite">

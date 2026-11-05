@@ -27,5 +27,10 @@ if (!existsSync(join(cwd, 'node_modules/nuxt/package.json'))) {
   console.log('Installing viewer dependencies…')
   run('npm', ['install', '--no-audit', '--no-fund'])
 }
-console.log('Starting the viewer. Open http://127.0.0.1:3000 (Ctrl+C stops only the viewer).')
-run('npm', ['run', 'dev'])
+if (env.PWNA_DEMO === '1') {
+  console.log('Starting the fictional demo. Open the local URL displayed below (Ctrl+C stops the demo).')
+  run('npm', ['exec', '--', 'nuxt', 'dev', '--host', '127.0.0.1', '--port', '3011'])
+} else {
+  console.log('Starting the viewer. Open http://127.0.0.1:3000 (Ctrl+C stops only the viewer).')
+  run('npm', ['run', 'dev'])
+}

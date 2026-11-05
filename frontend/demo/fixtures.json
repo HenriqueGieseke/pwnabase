@@ -1,0 +1,24 @@
+{
+  "complete": [
+    {"status":"recovered","record":{"ssid":"Example Library","bssid":"02:00:00:00:00:01","kind":"pmkid"},"password":"fictional-demo-1","sources":[{"path":"/fictional/library.pcap"}],"updated_at":"2026-01-01T12:00:00Z"},
+    {"status":"recovered","record":{"ssid":"Example Workshop","bssid":"02:00:00:00:00:02","kind":"eapol"},"password":"fictional-demo-2","sources":[{"path":"/fictional/workshop.pcap"}],"updated_at":"2026-01-01T11:00:00Z"}
+  ],
+  "exhausted": [
+    {"status":"wordlist_exhausted","record":{"ssid":"Example Garden","bssid":"02:00:00:00:00:03","kind":"pmkid"},"wordlist":{"label":"fictional-words"},"sources":[{"path":"/fictional/garden.pcap"}],"updated_at":"2026-01-01T10:00:00Z"}
+  ],
+  "no-usable-handshake": [
+    {"status":"no_usable_handshake","sources":[{"path":"/fictional/empty.pcap"}],"updated_at":"2026-01-01T09:00:00Z"}
+  ],
+  "tool-error": [
+    {"status":"tool_error","error":"Fictional example error","sources":[{"path":"/fictional/example.pcap"}],"updated_at":"2026-01-01T08:00:00Z"}
+  ],
+  "rules": [
+    {"id":"fictional-rules","description":"A fictional example catalog.","rules":[{"id":"unchanged","expression":":"}]}
+  ],
+  "batch": {"schema_version":1,"run_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","configuration_id":"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff","state":"completed","started_at":"2026-01-01T11:55:00Z","updated_at":"2026-01-01T12:00:00Z","ended_at":"2026-01-01T12:00:00Z","mode":"wordlist","source_label":"fictional-words","rule_label":null,"capture_index":3,"capture_total":3,"capture_name":"fictional-garden.pcap","ssid":"Example Garden","bssid":"02:00:00:00:00:03","outcomes":{"recovered":2,"exhausted":1,"skipped":0,"unusable":0,"failed":0}},
+  "events": [
+    {"kind":"batch_started","at":"2026-01-01T11:55:00Z"},
+    {"kind":"record_recovered","at":"2026-01-01T11:58:00Z","ssid":"Example Library","capture_name":"fictional-library.pcap"},
+    {"kind":"batch_completed","at":"2026-01-01T12:00:00Z"}
+  ]
+}

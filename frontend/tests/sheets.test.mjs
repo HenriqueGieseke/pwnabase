@@ -8,6 +8,27 @@ import { readBatchStatus, readBatchConfigurations, readBatchHistory } from '../s
 import { readBatchEvents } from '../server/utils/batch-events.mjs'
 import { createEventQueue } from '../app/utils/event-queue.mjs'
 import './privacy.test.mjs'
+import { createDemoRoot, demoEnvironment } from '../demo.mjs'
+
+test('fictional demo uses a separate temporary root with each sheet populated', async t => {
+  const root = await createDemoRoot()
+  t.after(() => rm(root, { recursive: true, force: true }))
+  assert.notEqual(root, process.env.PWNA_DATA_ROOT)
+  const env = demoEnvironment({ NUXT_DATA_ROOT: '/real', NITRO_DATA_ROOT: '/real',
+    NUXT_PUBLIC_DEMO: 'false', NITRO_PUBLIC_DEMO: 'false', PWNA_DATA_ROOT: '/real' }, root)
+  assert.equal(env.NUXT_DATA_ROOT, root)
+  assert.equal(env.NITRO_DATA_ROOT, root)
+  assert.equal(env.PWNA_DATA_ROOT, root)
+  assert.equal(env.NUXT_PUBLIC_DEMO, 'true')
+  assert.equal(env.NITRO_PUBLIC_DEMO, 'true')
+  const store = createStore(root)
+  for (const tab of SHEETS) assert.ok((await store.sheet(tab)).rows.length, `${tab} has fictional rows`)
+  const row = (await store.sheet('complete')).rows[0]
+  assert.ok(row.password.startsWith('fictional-demo-'))
+  const status = await readBatchStatus(root)
+  assert.equal(status.source_label, 'fictional-words')
+  assert.equal((await readBatchEvents(root, status.run_id)).events.length, 3)
+})
 
 test('batch status is read-only, filtered and detects stale runs', async t => {
   const { root, put } = await fixture(t)

@@ -13,11 +13,17 @@ From the project root, run:
 node frontend/start.mjs
 ```
 
-Open **http://127.0.0.1:3000**. Initial startup requires internet access to install
+For the normal viewer, open **http://127.0.0.1:3000**. Initial startup requires internet access to install
 dependencies. Nuxt 4.6.0 requires a newer Node patch than the host's 22.22.1; the
 launcher installs Node 22.22.3 inside `frontend/.runtime/` if necessary. It does
 not replace system Node. Dependencies, caches and build artifacts stay in the
 frontend directory. After setup, the same command starts the app again.
+
+To explore separately with fictional data, run `node frontend/demo.mjs` instead
+and open the local URL printed by Nuxt. The demo creates a temporary data
+directory and removes it on exit; it does not read your results or require
+Hashcat, capture files, a wordlist, or a GPU. Frontend dependencies and a local
+Node runtime may still need installation.
 
 The viewer is a separate process and can run while recovery continues. It never
 starts/stops Hashcat, acquires the recovery batch lock, or writes result JSON.
