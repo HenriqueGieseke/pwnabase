@@ -44,6 +44,12 @@ pagination and retains the first matching row in the selected sort order.
 The checkbox defaults to off and retains its setting per tab. Password visibility
 and each tab's duplicate setting are saved in browser storage across restarts;
 the browser stores the settings, not the passwords.
+Use **Hide SSIDs** to conceal network names, their byte representation, and
+capture filenames and paths in the viewer, including batch status. It is enabled
+by default and its setting is also saved locally. Like password hiding, this is
+display masking; the local files and API retain their data.
+Search text is also visually masked while either privacy control is enabled,
+because a search can contain a password or network name.
 Files without network identifiers stay separate, and hexadecimal password bytes
 are distinguished when the password cannot be displayed as text. Source files
 are never deleted or merged.

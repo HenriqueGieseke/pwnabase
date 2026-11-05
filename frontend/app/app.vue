@@ -1,6 +1,6 @@
 <script setup>
 import { createEventQueue } from './utils/event-queue.mjs'
-import { HIDDEN, loadPreferences, redactPasswords, savePreferences } from './utils/privacy.mjs'
+import { HIDDEN, loadPreferences, redactDetails, savePreferences } from './utils/privacy.mjs'
 const tabs = ['complete', 'exhausted', 'no-usable-handshake', 'tool-error', 'rules', 'batch-status']
 const titles = { complete: 'Complete', exhausted: 'Exhausted', 'no-usable-handshake': 'No usable handshake', 'tool-error': 'Tool errors', rules: 'Rules', 'batch-status': 'Batch status' }
 const descriptions = {
@@ -15,6 +15,7 @@ const active = ref('complete')
 const views = reactive(Object.fromEntries(tabs.map(tab => [tab, { search: '', hideDuplicates: false, wordlist: '', sort: 'updated', direction: 'desc', page: 1, selected: null, scroll: 0 }])))
 const view = computed(() => views[active.value])
 const hidePasswords = ref(true)
+const hideSsids = ref(true)
 let preferencesReady = false
 const sheet = ref(null)
 const batchStatus = ref(null)
@@ -74,6 +75,7 @@ function count(value) { return Number.isFinite(value) ? value.toLocaleString() :
 function percent(done, total) { return Number.isFinite(done) && Number.isFinite(total) && total > 0 && done <= total ? (done / total) * 100 : null }
 function cell(row, key) {
   if (key === 'password' && hidePasswords.value) return HIDDEN
+  if (hideSsids.value && active.value !== 'rules' && ['name', 'filename', 'error'].includes(key)) return HIDDEN
   if (key === 'updated') return date(row.updated)
   if (key === 'ruleSet') return row.ruleSet || (row.candidateSource === 'ssid' ? 'SSID profile' : 'Plain wordlist')
   if (key === 'kind') return row.kind?.toUpperCase() || '—'
@@ -263,15 +265,16 @@ watch(() => [active.value, view.value.search, view.value.hideDuplicates, view.va
 })
 watch(() => displayedBatch.value?.run_id, () => { if (active.value === 'batch-status') loadEvents() })
 watch(selectedConfiguration, () => { if (active.value === 'batch-status') loadHistory() })
-watch(() => [hidePasswords.value, ...tabs.map(tab => views[tab].hideDuplicates)], () => {
+watch(() => [hidePasswords.value, hideSsids.value, ...tabs.map(tab => views[tab].hideDuplicates)], () => {
   if (preferencesReady) {
-    try { savePreferences(window.localStorage, hidePasswords.value, views, tabs) } catch { /* Storage may be disabled. */ }
+    try { savePreferences(window.localStorage, hidePasswords.value, views, tabs, hideSsids.value) } catch { /* Storage may be disabled. */ }
   }
 })
 onMounted(() => {
   try {
     const saved = loadPreferences(window.localStorage, tabs)
     hidePasswords.value = saved.hidePasswords
+    hideSsids.value = saved.hideSsids
     for (const tab of tabs) views[tab].hideDuplicates = saved.duplicates[tab]
   } catch { /* Storage access can be disabled by the browser. */ }
   preferencesReady = true
@@ -279,7 +282,7 @@ onMounted(() => {
 })
 onUnmounted(() => { clearTimeout(debounce); clearInterval(timer); controller?.abort() })
 const generationFields = computed(() => ['seeds', 'generated', 'duplicates', 'rejected_length', 'eligible', 'non_utf8_seeds', 'valid_utf8', 'source_complete'].filter(key => Object.hasOwn(detail.value?.data?.candidate_generation || {}, key)))
-const raw = computed(() => JSON.stringify(hidePasswords.value ? redactPasswords(detail.value?.data) : detail.value?.data, null, 2))
+const raw = computed(() => JSON.stringify(redactDetails(detail.value?.data, hidePasswords.value, hideSsids.value), null, 2))
 const ruleObjects = computed(() => Array.isArray(detail.value?.data?.rules) ? detail.value.data.rules.filter(rule => rule && typeof rule === 'object') : [])
 </script>
 
@@ -298,12 +301,13 @@ const ruleObjects = computed(() => Array.isArray(detail.value?.data?.rules) ? de
         <div class="sheet-title"><div><span class="sheet-icon" aria-hidden="true">▤</span><h1>{{ titles[active] }}</h1><span v-if="active !== 'batch-status'" class="count">{{ sheet?.total ?? '—' }} files</span></div><span class="file-type">{{ active === 'batch-status' ? 'LOCAL BATCH' : 'JSON COLLECTION' }}</span></div>
         <p class="sheet-description">{{ descriptions[active] }}</p>
         <div v-if="active === 'batch-status'" class="batch-status" aria-live="polite">
+          <label class="deduplicate"><input v-model="hideSsids" type="checkbox"> Hide SSIDs</label>
           <div v-if="error" class="notice" role="alert">{{ error }}</div>
           <nav v-if="configurations.length" class="config-tabs" aria-label="Batch configurations"><button v-for="config in configurations" :key="config.id" :class="{ active: selectedConfiguration === config.id }" @click="chooseConfiguration(config.id)">{{ config.label }}</button><button v-if="manualConfiguration && batchStatus" @click="chooseCurrentBatch">Current batch</button></nav>
           <template v-if="displayedBatch"><h2>{{ displayedBatch.state }}</h2><p>Started: {{ date(displayedBatch.started_at) }}</p><p>Last update: {{ date(displayedBatch.updated_at) }}</p><p v-if="displayedBatch.state === 'unknown'">No recent update has arrived. The batch may have stopped or become unavailable.</p>
             <div class="batch-metrics">
-              <section v-if="displayedBatch.capture_total !== undefined"><h3>Captures started</h3><p>{{ count(displayedBatch.capture_index) }} / {{ count(displayedBatch.capture_total) }}</p><progress v-if="percent(displayedBatch.capture_index, displayedBatch.capture_total) !== null" :value="percent(displayedBatch.capture_index, displayedBatch.capture_total)" max="100" /><p v-if="displayedBatch.capture_name">{{ displayedBatch.capture_name }}</p></section>
-              <section><h3>Current record</h3><p>{{ displayedBatch.ssid || 'Unknown' }}</p><p>{{ displayedBatch.bssid || 'Unknown' }}</p></section>
+              <section v-if="displayedBatch.capture_total !== undefined"><h3>Captures started</h3><p>{{ count(displayedBatch.capture_index) }} / {{ count(displayedBatch.capture_total) }}</p><progress v-if="percent(displayedBatch.capture_index, displayedBatch.capture_total) !== null" :value="percent(displayedBatch.capture_index, displayedBatch.capture_total)" max="100" /><p v-if="displayedBatch.capture_name">{{ hideSsids ? HIDDEN : displayedBatch.capture_name }}</p></section>
+              <section><h3>Current record</h3><p>{{ hideSsids && displayedBatch.ssid ? HIDDEN : displayedBatch.ssid || 'Unknown' }}</p><p>{{ displayedBatch.bssid || 'Unknown' }}</p></section>
               <section><h3>Candidate source</h3><p>{{ displayedBatch.source_label || 'Unknown' }}</p><p>{{ displayedBatch.rule_label || (displayedBatch.mode === 'wordlist' ? 'Plain wordlist' : 'Rules unavailable') }}</p><p v-if="displayedBatch.resumed">Resumed from checkpoint</p></section>
               <section v-if="displayedBatch.mode === 'wordlist-profile'"><h3>Wordlist generation</h3><p>Source words: {{ count(displayedBatch.source_words) }}</p><p>Generated bytes: {{ count(displayedBatch.wordlist_position) }} / {{ count(displayedBatch.wordlist_size) }}</p><p>Generated candidates: {{ count(displayedBatch.generated_candidates) }}</p><p>Hashcat-confirmed: {{ count(displayedBatch.hashcat_confirmed_candidates) }}</p><p>Checkpointed: {{ count(displayedBatch.checkpointed_candidates) }}</p><p>Within-word progress: Unknown</p></section>
               <section v-if="displayedBatch.mode === 'ssid'"><h3>SSID generation</h3><p>Generated candidates: {{ count(displayedBatch.generated_candidates) }}</p></section>
@@ -313,16 +317,17 @@ const ruleObjects = computed(() => Array.isArray(detail.value?.data?.rules) ? de
               <section v-if="displayedBatch.execution_candidates"><h3>Candidate totals this run</h3><p>Generated: {{ count(displayedBatch.execution_candidates.generated) }}</p><p>Confirmed in exhausted batches: {{ count(displayedBatch.execution_candidates.confirmed) }}</p><p>Checkpointed: {{ count(displayedBatch.execution_candidates.checkpointed) }}</p></section>
               <section v-else-if="['wordlist', 'native-rules'].includes(displayedBatch.mode)"><h3>Candidate totals this run</h3><p>Unavailable</p></section>
             </div>
-            <section class="event-log"><h3>Recent events</h3><p v-if="eventsError" class="notice">{{ eventsError }}</p><button v-if="eventsBefore !== null" :disabled="loadingOlderEvents" @click="loadOlderEvents">Load older events</button><div class="event-window"><p v-for="item in events" :key="item.id"><time>{{ date(item.at) }}</time> · {{ item.kind.replaceAll('_', ' ') }}<template v-if="item.category"> · {{ item.category }}</template><template v-if="item.capture_name"> · {{ item.capture_name }}</template><template v-if="item.ssid"> · {{ item.ssid }}</template><template v-if="item.bssid"> · {{ item.bssid }}</template></p><p v-if="!events.length">No events available.</p></div></section>
+            <section class="event-log"><h3>Recent events</h3><p v-if="eventsError" class="notice">{{ eventsError }}</p><button v-if="eventsBefore !== null" :disabled="loadingOlderEvents" @click="loadOlderEvents">Load older events</button><div class="event-window"><p v-for="item in events" :key="item.id"><time>{{ date(item.at) }}</time> · {{ item.kind.replaceAll('_', ' ') }}<template v-if="item.category"> · {{ item.category }}</template><template v-if="item.capture_name"> · {{ hideSsids ? HIDDEN : item.capture_name }}</template><template v-if="item.ssid"> · {{ hideSsids ? HIDDEN : item.ssid }}</template><template v-if="item.bssid"> · {{ item.bssid }}</template></p><p v-if="!events.length">No events available.</p></div></section>
             <section v-if="selectedConfiguration" class="run-history"><h3>Run history</h3><p>Estimated history storage (based on recent runs): {{ count(historyBytes) }} bytes</p><p v-if="historyError" class="notice">{{ historyError }}</p><div class="history-list"><button v-for="run in historyRuns" :key="run.run_id" :class="{ active: displayedBatch.run_id === run.run_id }" @click="chooseHistoryRun(run)"><span>{{ date(run.started_at) }} · {{ run.state }}<template v-if="run.resumed_any"> · resumed</template></span><span>Ended: {{ run.ended_at ? date(run.ended_at) : 'Unknown' }}</span></button></div><button v-if="historyBefore !== null" class="load-history" :disabled="loadingOlderHistory" @click="loadOlderHistory">Load older runs</button></section>
           </template>
           <div v-else class="empty"><h3>No batch status yet</h3><p>Run a new recovery batch to see its status here.</p></div>
         </div>
         <template v-else>
         <div class="toolbar">
-          <label class="search"><span aria-hidden="true">⌕</span><input v-model="view.search" type="search" :aria-label="`Search ${titles[active]}`" placeholder="Search this sheet…" @input="view.page = 1"></label>
+          <label class="search"><span aria-hidden="true">⌕</span><input v-model="view.search" :type="hideSsids || hidePasswords ? 'password' : 'search'" autocomplete="off" :aria-label="`Search ${titles[active]}`" placeholder="Search this sheet…" @input="view.page = 1"></label>
           <label class="deduplicate"><input v-model="view.hideDuplicates" type="checkbox" @change="view.page = 1"> Hide duplicates</label>
           <label class="deduplicate"><input v-model="hidePasswords" type="checkbox"> Hide passwords</label>
+          <label class="deduplicate"><input v-model="hideSsids" type="checkbox"> Hide SSIDs</label>
           <label v-if="active === 'exhausted'" class="filter"><span class="sr-only">Candidate source</span><select v-model="view.wordlist" @change="view.page = 1"><option value="">All sources</option><option v-for="wordlist in sheet?.wordlists || []" :key="wordlist">{{ wordlist }}</option></select></label>
           <div class="toolbar-end"><span class="sync" aria-live="polite">{{ busy ? 'Refreshing…' : refreshed ? `Synced ${refreshed}` : 'Connecting…' }}</span><button class="refresh" :disabled="busy" @click="load(true)"><span aria-hidden="true">↻</span> Refresh</button></div>
         </div>
@@ -342,11 +347,11 @@ const ruleObjects = computed(() => Array.isArray(detail.value?.data?.rules) ? de
 
           <aside v-if="detailOpen" class="details" aria-label="Result details">
             <div class="details-heading"><span>FILE DETAILS</span><button aria-label="Close details" @click="detailOpen = false">×</button></div>
-            <template v-if="detail"><h3>{{ detail.row.name }}</h3><p class="detail-filename mono">{{ detail.row.filename }}</p><div class="detail-status">{{ detail.row.status.replaceAll('_', ' ') }}</div>
+            <template v-if="detail"><h3>{{ cell(detail.row, 'name') }}</h3><p class="detail-filename mono">{{ cell(detail.row, 'filename') }}</p><div class="detail-status">{{ detail.row.status.replaceAll('_', ' ') }}</div>
               <p v-if="detail.problem" class="notice">{{ detail.problem }}</p>
               <dl v-if="detail.data && active !== 'rules'"><template v-for="key in ['bssid', 'kind', 'wordlist', 'ruleSet', 'updated']" :key="key"><dt>{{ { bssid: 'BSSID', kind: 'Record type', wordlist: 'Candidate source', ruleSet: 'Rule set', updated: 'Updated' }[key] }}</dt><dd>{{ cell(detail.row, key) || '—' }}</dd></template><template v-if="active === 'complete'"><dt>Password</dt><dd class="password mono">{{ cell(detail.row, 'password') || '—' }}</dd></template></dl>
               <div v-if="active === 'rules' && detail.data" class="catalog-intro"><p>{{ detail.data.description }}</p><span>{{ ruleObjects.length }} transformation stages / rules</span></div>
-              <section v-if="Array.isArray(detail.data?.sources) && detail.data.sources.length" class="source-list"><h4>CAPTURE PROVENANCE · {{ detail.data.sources.length }}</h4><article v-for="(source, index) in detail.data.sources" :key="index"><p>{{ source?.path || 'Unknown source path' }}</p><code v-if="source?.sha256">SHA-256 {{ source.sha256 }}</code></article></section>
+              <section v-if="Array.isArray(detail.data?.sources) && detail.data.sources.length" class="source-list"><h4>CAPTURE PROVENANCE · {{ detail.data.sources.length }}</h4><article v-for="(source, index) in detail.data.sources" :key="index"><p>{{ hideSsids && source?.path ? HIDDEN : source?.path || 'Unknown source path' }}</p><code v-if="source?.sha256">SHA-256 {{ source.sha256 }}</code></article></section>
               <section v-if="detail.data?.candidate_generation" class="generation"><h4>CANDIDATE GENERATION</h4><dl><template v-for="key in generationFields" :key="key"><dt>{{ key.replaceAll('_', ' ') }}</dt><dd>{{ detail.data.candidate_generation[key] }}</dd></template></dl></section>
               <section v-if="ruleObjects.length" class="rule-list"><h4>TRANSFORMATIONS · {{ ruleObjects.length }}</h4><article v-for="rule in ruleObjects" :key="rule.id"><code>{{ rule.expression || rule.operation }}</code><pre v-if="rule.operation" class="profile-config">{{ JSON.stringify(Object.fromEntries(Object.entries(rule).filter(([key]) => !['id', 'description', 'operation'].includes(key))), null, 2) }}</pre><strong>{{ rule.id }}</strong><p>{{ rule.description }}</p></article></section>
               <details v-if="detail.data" class="raw"><summary>Raw JSON <span>{ }</span></summary><pre>{{ raw }}</pre></details>
