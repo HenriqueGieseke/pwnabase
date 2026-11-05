@@ -11,11 +11,24 @@ The [security study guide](docs/learning/pwnabase-security-study-guide.md)
 explains the workflow, tools, cryptography, and source code with practical
 exercises using synthetic or fictional data.
 
-The local spreadsheet viewer is started separately with `node frontend/start.mjs`.
-Open `http://127.0.0.1:3000`; recovery can keep running in its own terminal.
-See [viewer setup and behavior](frontend/README.md).
+![Pwnabase viewer showing fictional demo data with privacy controls enabled](docs/images/fictional-demo.png)
 
-Local batch password recovery for authorized WPA/WPA2 captures. Python 3.10+ orchestrates `hcxpcapngtool` and Hashcat mode 22000; no Python packages are required.
+## Try the fictional demo
+
+From the project root, run `node frontend/demo.mjs` and open the local URL it
+prints. The demo displays fictional results and batch history in an isolated
+temporary workspace. It needs Node.js and frontend dependencies, which the
+launcher can install on first run; it does not need captures, a wordlist,
+Hashcat, or a GPU. Ctrl+C stops the demo. See [viewer setup](frontend/README.md)
+for details and `node frontend/start.mjs` for the normal local viewer.
+
+Pwnabase currently processes supported WPA/WPA2 authentication records offline
+and runs one local batch at a time. Wardriving imports, a shared database, and
+distributed processing are future goals. The viewer's privacy toggles mask
+displayed values; local files and API responses can still contain sensitive data.
+
+Recovery requires Python 3.10+, `hcxpcapngtool`, and Hashcat mode 22000; no
+Python packages are required.
 
 ## Run
 
@@ -25,21 +38,24 @@ On Ubuntu, install the tools and a CPU compute backend:
 sudo apt install hashcat hcxtools pocl-opencl-icd
 ```
 
-From this directory:
-
-```bash
-python3 recover.py --check
-python3 recover.py
-```
-
 Captured traffic, recovered results, local state, credentials, and password
-datasets are excluded from Git. After a fresh clone, create `handshakes/` and
-install the wordlist separately (or supply your own with `--wordlist`):
+datasets are excluded from Git. After a fresh clone, install the wordlist
+separately (or supply your own with `--wordlist`):
 
 ```bash
 git clone https://github.com/HideMeBr/SambaTu.git SambaTu
-mkdir -p handshakes
 ```
+
+From this directory, check and run using the CPU backend:
+
+```bash
+python3 recover.py --check --device-types 1
+python3 recover.py --device-types 1
+```
+
+Remove `--device-types 1` to use the default GPU backend when a compatible
+GPU and OpenCL backend are available. Put authorized captures in `handshakes/`
+before starting a batch.
 
 Keep newly imported wardriving data in a dedicated ignored data directory; JSON
 and CSV filenames are not globally ignored because source catalogs and fixtures
