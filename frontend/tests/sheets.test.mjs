@@ -7,6 +7,7 @@ import { createStore, SHEETS } from '../server/utils/sheets.mjs'
 import { readBatchStatus, readBatchConfigurations, readBatchHistory } from '../server/utils/batch-status.mjs'
 import { readBatchEvents } from '../server/utils/batch-events.mjs'
 import { createEventQueue } from '../app/utils/event-queue.mjs'
+import './privacy.test.mjs'
 
 test('batch status is read-only, filtered and detects stale runs', async t => {
   const { root, put } = await fixture(t)

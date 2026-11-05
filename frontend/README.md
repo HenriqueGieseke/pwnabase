@@ -2,8 +2,10 @@
 
 A read-only Nuxt/Vue viewer for Pwnabase JSON data. The dark workbook has five
 directory tabs, 64-pixel rows, sortable columns, search, 50-row pages and a details
-panel with raw JSON. Passwords are shown directly in the complete sheet. Non-UTF-8
-passwords are displayed using their exact hexadecimal bytes.
+panel with raw JSON. Passwords are hidden by default in the complete sheet,
+details, tooltips and raw JSON. Use **Hide passwords** to reveal them; non-UTF-8
+passwords are displayed using their exact hexadecimal bytes. This controls the
+display, not access to local result files or API responses.
 
 From the project root, run:
 
@@ -39,7 +41,9 @@ time when no result timestamp exists. All tabs have independent controls.
 Enable **Hide duplicates** beside search to show one row per identical SSID,
 BSSID and password combination in the active sheet. Filtering happens before
 pagination and retains the first matching row in the selected sort order.
-The checkbox defaults to off and retains its setting per tab during refresh.
+The checkbox defaults to off and retains its setting per tab. Password visibility
+and each tab's duplicate setting are saved in browser storage across restarts;
+the browser stores the settings, not the passwords.
 Files without network identifiers stay separate, and hexadecimal password bytes
 are distinguished when the password cannot be displayed as text. Source files
 are never deleted or merged.

@@ -1,5 +1,6 @@
 <script setup>
 import { createEventQueue } from './utils/event-queue.mjs'
+import { HIDDEN, loadPreferences, redactPasswords, savePreferences } from './utils/privacy.mjs'
 const tabs = ['complete', 'exhausted', 'no-usable-handshake', 'tool-error', 'rules', 'batch-status']
 const titles = { complete: 'Complete', exhausted: 'Exhausted', 'no-usable-handshake': 'No usable handshake', 'tool-error': 'Tool errors', rules: 'Rules', 'batch-status': 'Batch status' }
 const descriptions = {
@@ -13,6 +14,8 @@ const descriptions = {
 const active = ref('complete')
 const views = reactive(Object.fromEntries(tabs.map(tab => [tab, { search: '', hideDuplicates: false, wordlist: '', sort: 'updated', direction: 'desc', page: 1, selected: null, scroll: 0 }])))
 const view = computed(() => views[active.value])
+const hidePasswords = ref(true)
+let preferencesReady = false
 const sheet = ref(null)
 const batchStatus = ref(null)
 const configurations = ref([])
@@ -70,6 +73,7 @@ function date(value) {
 function count(value) { return Number.isFinite(value) ? value.toLocaleString() : 'Unknown' }
 function percent(done, total) { return Number.isFinite(done) && Number.isFinite(total) && total > 0 && done <= total ? (done / total) * 100 : null }
 function cell(row, key) {
+  if (key === 'password' && hidePasswords.value) return HIDDEN
   if (key === 'updated') return date(row.updated)
   if (key === 'ruleSet') return row.ruleSet || (row.candidateSource === 'ssid' ? 'SSID profile' : 'Plain wordlist')
   if (key === 'kind') return row.kind?.toUpperCase() || '—'
@@ -259,10 +263,23 @@ watch(() => [active.value, view.value.search, view.value.hideDuplicates, view.va
 })
 watch(() => displayedBatch.value?.run_id, () => { if (active.value === 'batch-status') loadEvents() })
 watch(selectedConfiguration, () => { if (active.value === 'batch-status') loadHistory() })
-onMounted(() => { load(); timer = setInterval(() => load(), 5000) })
+watch(() => [hidePasswords.value, ...tabs.map(tab => views[tab].hideDuplicates)], () => {
+  if (preferencesReady) {
+    try { savePreferences(window.localStorage, hidePasswords.value, views, tabs) } catch { /* Storage may be disabled. */ }
+  }
+})
+onMounted(() => {
+  try {
+    const saved = loadPreferences(window.localStorage, tabs)
+    hidePasswords.value = saved.hidePasswords
+    for (const tab of tabs) views[tab].hideDuplicates = saved.duplicates[tab]
+  } catch { /* Storage access can be disabled by the browser. */ }
+  preferencesReady = true
+  load(); timer = setInterval(() => load(), 5000)
+})
 onUnmounted(() => { clearTimeout(debounce); clearInterval(timer); controller?.abort() })
 const generationFields = computed(() => ['seeds', 'generated', 'duplicates', 'rejected_length', 'eligible', 'non_utf8_seeds', 'valid_utf8', 'source_complete'].filter(key => Object.hasOwn(detail.value?.data?.candidate_generation || {}, key)))
-const raw = computed(() => JSON.stringify(detail.value?.data, null, 2))
+const raw = computed(() => JSON.stringify(hidePasswords.value ? redactPasswords(detail.value?.data) : detail.value?.data, null, 2))
 const ruleObjects = computed(() => Array.isArray(detail.value?.data?.rules) ? detail.value.data.rules.filter(rule => rule && typeof rule === 'object') : [])
 </script>
 
@@ -305,6 +322,7 @@ const ruleObjects = computed(() => Array.isArray(detail.value?.data?.rules) ? de
         <div class="toolbar">
           <label class="search"><span aria-hidden="true">⌕</span><input v-model="view.search" type="search" :aria-label="`Search ${titles[active]}`" placeholder="Search this sheet…" @input="view.page = 1"></label>
           <label class="deduplicate"><input v-model="view.hideDuplicates" type="checkbox" @change="view.page = 1"> Hide duplicates</label>
+          <label class="deduplicate"><input v-model="hidePasswords" type="checkbox"> Hide passwords</label>
           <label v-if="active === 'exhausted'" class="filter"><span class="sr-only">Candidate source</span><select v-model="view.wordlist" @change="view.page = 1"><option value="">All sources</option><option v-for="wordlist in sheet?.wordlists || []" :key="wordlist">{{ wordlist }}</option></select></label>
           <div class="toolbar-end"><span class="sync" aria-live="polite">{{ busy ? 'Refreshing…' : refreshed ? `Synced ${refreshed}` : 'Connecting…' }}</span><button class="refresh" :disabled="busy" @click="load(true)"><span aria-hidden="true">↻</span> Refresh</button></div>
         </div>
