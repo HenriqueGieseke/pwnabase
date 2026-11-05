@@ -233,6 +233,15 @@ class ResultStore:
         return self.root / '.pwnabase' / 'checkpoints' / f'{record_id}-{attempt_key}.json'
 
     def prepare(self, label):
+        # A clone creates tracked placeholder directories using the caller's
+        # umask. Tighten only untouched placeholders, not existing user data.
+        for folder in ('complete', 'exhausted', 'no-usable-handshake', 'tool-error'):
+            directory = self.root / folder
+            if directory.is_dir() and not directory.is_symlink():
+                entries = list(directory.iterdir())
+                if (len(entries) == 1 and entries[0].name == '.gitkeep' and not entries[0].is_symlink()
+                        and entries[0].is_file() and entries[0].stat().st_size == 0):
+                    directory.chmod(0o700)
         for folder in ['complete', f'exhausted/{label}', 'no-usable-handshake', 'tool-error']:
             (self.root / folder).mkdir(parents=True, exist_ok=True, mode=0o700)
 
