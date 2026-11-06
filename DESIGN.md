@@ -139,6 +139,184 @@ On interruption or failure, stop checks, abort the commit when invoked as a hook
 and clean up temporary snapshots. Provide clear stage/failure output and preserve
 the failing command's useful diagnostics.
 
+## Interrupted transformed-wordlist attempts (investigation)
+
+This section records an earlier investigation and its design decisions. Resume
+and workload controls have since been implemented; see the README for current
+behavior.
+
+A synthetic workflow reproduction confirms that an interrupted streamed
+wordlist-profile attempt restarts at its first candidate chunk. Two runs both
+returned interruption code 130 and replayed the same first chunk. Completed
+outcome files are retained; there is currently no mid-attempt checkpoint. This
+matches the original interruption contract, which the modular refactor preserved.
+The capture traversal counter starting at one alone does not prove that completed
+records are being retried; saved outcomes are checked inside capture processing.
+
+The full default profile has at most 115,201 generated combinations per seed.
+The current SambaTu input contains 2,140,469 entries, giving an upper bound of
+246,584,169,269 combinations per authentication record before per-seed
+deduplication and eligibility filtering. Three invented seeds generated in about
+0.04–0.05 seconds each locally, with substantially fewer eligible unique
+candidates. These measurements do not establish actual wordlist-wide generation
+cost, overnight runtime or GPU throughput.
+
+Resume semantics, workload controls and progress visibility are being designed.
+Any checkpoint must represent confirmed tested work, not merely generated or
+buffered candidates, so interruption cannot skip untested candidates. No recovery
+implementation or live batch was changed during this investigation.
+
+Agreed goals: add durable resume for transformed-wordlist attempts, add an
+explicitly selected light profile near 1,000 combinations per source word while
+retaining the full profile, and improve live progress/checkpoint visibility plus
+startup workload estimates. Aim for a checkpoint roughly every minute, accepting
+replay of one unfinished batch; measure overhead before selecting batch size.
+Resume automatically only when authentication record, wordlist contents, profile
+behavior and generator version match. Other identities start separate attempts.
+A stopped position within an unconfirmed batch cannot be promised as an exact
+restart position. Earlier interrupted runs without checkpoints cannot recover
+their discarded partial progress retroactively.
+
+Treat approximately 1,000 combinations per source word as a maximum expansion
+budget, with fewer unique eligible candidates after filtering and deduplication.
+Do not generate the full profile and truncate or pad with duplicates. Prioritize
+original/lowercase/initial-capital forms, curated numeric suffixes, limited years,
+and a small selection of punctuation and leet substitutions. Keep extensive
+separator and unusual case permutations in the full profile.
+
+Provide human-readable live terminal updates with clear stage headings, blank
+lines between captures/attempts, readable count units, and distinct generated,
+confirmed-tested and checkpointed progress. Avoid per-candidate output and keep
+logging overhead bounded. A read-only --status command should inspect saved
+progress from another terminal without acquiring the batch lock, running tools,
+or stopping the active run. Defer frontend progress controls.
+
+Preserve unreadable checkpoints and report an error for the affected attempt,
+continuing other inputs. Starting that attempt over requires an explicit action.
+Use bounded temporary candidate files per batch and commit progress only after
+Hashcat confirms that batch finished; never persist the entire expanded list.
+Clean temporary batches after use while retaining durable confirmed checkpoints.
+
+Always print a startup workload estimate and offer an estimate-only option.
+Do not introduce a mandatory confirmation prompt. Clearly distinguish theoretical
+upper bounds, sampled estimates and measured throughput; show runtime as unknown
+until there is sufficient evidence to estimate it.
+
+Support --ssid-rules light as the short explicit light-profile selection. Keep
+bare --ssid-rules equivalent to the existing full profile. Both transformed
+wordlist profiles resume automatically from matching confirmed checkpoints when
+the same command is rerun. Provide --restart-incomplete only as a deliberate
+override for matching unfinished attempts, preserving completed outcomes and a
+backup of prior checkpoints. It is not required for ordinary resume.
+
+Keep the light profile as readable, versioned JSON with fixed behavior and
+ordering. Research and aggregate local findings inform its curated defaults;
+newly recovered passwords must not automatically mutate the profile. Retain
+behavioral fingerprints so descriptive edits alone do not reset an experiment.
+
+The user authorized local aggregate analysis of recovered passwords as a design
+input and research into published breach-password variation patterns. Never put
+recovered values, byte strings, identities or individual examples into reports,
+web queries, profiles or version-controlled documentation. Research notes and
+selection-bias limitations are in docs/research/light-profile-inputs.md.
+
+## Batch status tab (decisions in progress)
+
+This section records the original design discussion. Batch status and run
+history have since been implemented; see the README for current behavior.
+
+Add a read-only local frontend tab showing the current or most recent batch.
+Starting and stopping batches remains a terminal operation. The user will stop
+the current batch before implementation; live monitoring applies to subsequent
+runs. A stale update is shown as unknown with its last update time, rather than
+being represented as certainly running or cleanly stopped.
+
+Within the tab, automatically group runs by batch configuration. Changed wordlist
+contents or transformation behavior create a new, numbered subtab even when a
+name is unchanged; renaming or moving unchanged wordlist contents does not.
+Repeated runs of a matching configuration share a subtab. Show capture progress,
+the current authentication record, wordlist position, and transformation counts;
+show percentages only where a reliable total exists. Distinguish generated,
+Hashcat-confirmed and checkpointed candidates, and do not claim exact progress
+inside a source word when it cannot be measured reliably.
+
+Retain past runs for later comparison, initially loading the latest 20 with a
+control to load older runs. Retain compact, sanitized event logs per run,
+initially showing the latest 200 events with a control to load earlier events.
+Do not persist raw Hashcat output or expose candidate words or passwords in logs.
+Run history can support future comparison of configurations; sanitized logs alone
+do not identify the precise mutation that recovered a password. Further storage,
+retention and telemetry details are still being discussed.
+
+Record meaningful events rather than periodic numeric updates; keep live progress
+separately to limit log growth. Display starting, running, completed, interrupted,
+failed and unknown states with the last-update time. Show Hashcat speed and ETA
+when available, labeling them as applying to its current invocation. Retain
+configuration identity, outcome and candidate counts, and timings for future
+comparisons; detailed attribution of successful transformations is deferred.
+Support plain wordlists, SSID-only attempts, native Hashcat rules, and full or
+light transformed-wordlist profiles, hiding inapplicable progress fields.
+Automatically select an active configuration unless the user is inspecting an
+older run. Refresh approximately every five seconds and show unknown after about
+30 seconds without a heartbeat. Display the current capture filename, SSID and
+BSSID, and recovered, exhausted, skipped, unusable and failed outcome counts.
+Each execution, including a checkpoint-resumed execution, is a separate run
+within its configuration and reports its own outcomes, including skips. Events
+include concise sanitized errors when safe, or a general error category and
+affected context when raw diagnostics are unsafe. Store private status and run
+history outside Git and retain them across frontend and machine restarts.
+Show a compact summary and progress bars above recent logs and selectable run
+history, using the existing dark style and larger rows. History starts with
+batches run after this feature is installed. Retain it until a future cleanup
+feature is available and show its approximate storage size.
+For native Hashcat rules, show the selected rule set and reliable reported
+progress, with current-rule or rule-total progress marked unknown when it is
+unavailable. For transformed wordlists, show the profile, source-word position
+and generated, confirmed and checkpointed candidate counts.
+
+## Portfolio readiness
+
+Prepare Pwnabase for an employer to clone, understand, and explore without a
+GPU or real wireless captures. Keep the GitHub repository private until the
+owner separately chooses to change its visibility.
+
+Include tracked placeholders for handshakes/, complete/, exhausted/,
+no-usable-handshake/, and tool-error/ so a fresh clone has the expected
+directories. Keep all actual inputs and results inside them ignored, including
+nested data. Verify ignore rules with fictional paths without staging local
+captures or results. Preserve existing protections for other private data. On
+batch startup, automatically make placeholder-only result directories private;
+preserve permissions on directories containing existing user data. Report a
+filesystem error if a placeholder-only directory cannot be secured.
+
+Add viewer controls beside Hide duplicates to hide passwords and SSIDs. Both
+privacy controls default to hidden when no valid preference exists. Apply them
+throughout visible tables, tooltips, details, raw JSON and batch views, including
+password and SSID byte representations and capture filenames and paths that may
+contain network names. Masking is a display aid: local API responses and result
+files can still contain sensitive data. Store only toggle preferences in the
+browser, never result data or identifying values. Persist preferences across
+batches, reloads and viewer restarts. Password and SSID visibility are global;
+Hide duplicates retains its separate preference for each sheet.
+
+Provide an isolated, clearly labeled fictional dataset and a separate demo
+launch path that does not touch normal results or require Hashcat, an extractor,
+captures, a wordlist, or a GPU. Frontend dependencies remain necessary. Create
+a README screenshot solely from the fictional demo with both privacy controls
+enabled. Lead the README with the project purpose, demo, quick start, current
+limitations, and links to the study guide and detailed setup.
+
+Add a Linux GitHub Actions workflow for the existing fast repository checks
+with synthetic test data. Optional real-tool integration remains explicit and
+local. Verify privacy controls, preference persistence, accessible labels,
+directory ignore behavior, demo isolation and the documented setup. Add the
+MIT License with copyright attributed to 2026 Pwnabase contributors.
+
+Develop this work through a specification and ordered tickets, then implement
+and review in small steps. The agreed priorities are safe directory scaffolding,
+viewer privacy and preferences, the fictional demo and presentation, and CI and
+licensing; refine dependencies when the tickets are written.
+
 ## Development prerequisite
 
 Install and verify Hashcat locally before starting implementation, so development and testing can use the real tool. Install hcxpcapngtool for capture extraction as well. Synthetic-only validation is insufficient for the requested development workflow.

@@ -55,3 +55,9 @@ An outcome in which candidate generation produces no password candidates within 
 
 **Rule set**:
 An ordered collection of mutation rules used for a recovery attempt. The rule set identifies the transformations tried in addition to the chosen candidate source.
+
+**Batch**:
+One execution of the recovery workflow across selected captures and a candidate source.
+
+**Batch configuration**:
+The candidate source and transformations that distinguish a group of comparable recovery batches. A change in wordlist contents or transformation behavior creates a different configuration.

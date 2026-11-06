@@ -300,10 +300,9 @@ const ruleObjects = computed(() => Array.isArray(detail.value?.data?.rules) ? de
     <main>
       <section class="sheet-shell" aria-label="Result sheets">
         <p v-if="demo" class="notice" role="status">Demo: all displayed data is fictional.</p>
-        <div class="sheet-title"><div><span class="sheet-icon" aria-hidden="true">▤</span><h1>{{ titles[active] }}</h1><span v-if="active !== 'batch-status'" class="count">{{ sheet?.total ?? '—' }} files</span></div><span class="file-type">{{ active === 'batch-status' ? 'LOCAL BATCH' : 'JSON COLLECTION' }}</span></div>
+        <div class="sheet-title"><div><span class="sheet-icon" aria-hidden="true">▤</span><h1>{{ titles[active] }}</h1><span v-if="active !== 'batch-status'" class="count">{{ sheet?.total ?? '—' }} files</span></div><div><label v-if="active === 'batch-status'" class="deduplicate"><input v-model="hideSsids" type="checkbox"> Hide SSIDs</label><span class="file-type">{{ active === 'batch-status' ? 'LOCAL BATCH' : 'JSON COLLECTION' }}</span></div></div>
         <p class="sheet-description">{{ descriptions[active] }}</p>
         <div v-if="active === 'batch-status'" class="batch-status" aria-live="polite">
-          <label class="deduplicate"><input v-model="hideSsids" type="checkbox"> Hide SSIDs</label>
           <div v-if="error" class="notice" role="alert">{{ error }}</div>
           <nav v-if="configurations.length" class="config-tabs" aria-label="Batch configurations"><button v-for="config in configurations" :key="config.id" :class="{ active: selectedConfiguration === config.id }" @click="chooseConfiguration(config.id)">{{ config.label }}</button><button v-if="manualConfiguration && batchStatus" @click="chooseCurrentBatch">Current batch</button></nav>
           <template v-if="displayedBatch"><h2>{{ displayedBatch.state }}</h2><p>Started: {{ date(displayedBatch.started_at) }}</p><p>Last update: {{ date(displayedBatch.updated_at) }}</p><p v-if="displayedBatch.state === 'unknown'">No recent update has arrived. The batch may have stopped or become unavailable.</p>
